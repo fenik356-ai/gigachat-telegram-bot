@@ -19,7 +19,12 @@ STYLE_PROMPTS = {
 }
 
 
-def get_gigachat_response(user_text: str, style: str = "friendly", variants_count: int = 3) -> str:
+def get_gigachat_response(
+    user_text: str,
+    style: str = "friendly",
+    variants_count: int = 3,
+    dialogue_context: str = "",
+) -> str:
     if not user_text or not user_text.strip():
         return "Пожалуйста, напиши текстовое сообщение."
 
@@ -30,20 +35,29 @@ def get_gigachat_response(user_text: str, style: str = "friendly", variants_coun
 
     answer_template = "\n".join([f"{i}) ..." for i in range(1, variants_count + 1)])
 
+    context_block = ""
+    if dialogue_context.strip():
+        context_block = (
+            "История последних сообщений:\n"
+            f"{dialogue_context}\n\n"
+            "Учитывай эту историю, но не пересказывай её.\n\n"
+        )
+
     prompt = (
         "Ты помощник по переписке. "
-        f"Сформируй {variants_count} разных варианта ответа на сообщение пользователя. "
+        f"Сформируй {variants_count} разных варианта ответа на новое сообщение пользователя. "
         f"Пиши {STYLE_PROMPTS[style]}. "
-        "Варианты должны быть полезными и естественными. "
+        "Варианты должны быть полезными, естественными и уместными по контексту. "
         "Не добавляй пояснений перед списком и после списка. "
         f"Оформи строго так:\n{answer_template}\n\n"
-        f"Сообщение пользователя: {user_text}"
+        f"{context_block}"
+        f"Новое сообщение пользователя: {user_text}"
     )
 
     with GigaChat(
         credentials=GIGACHAT_CREDENTIALS,
         scope=GIGACHAT_SCOPE,
-        verify_ssl_certs=False,  # для простой локальной MVP-проверки
+        verify_ssl_certs=False,  # для простой локальной/тестовой версии
     ) as giga:
         response = giga.chat(prompt)
         return response.choices[0].message.content
