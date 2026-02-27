@@ -29,8 +29,10 @@ from module1_reply_presets import (
 from scenario_presets import (
     DEFAULT_SCENARIO_KEY,
     SCENARIO_OPTIONS,
+    get_scenario_defaults,
     get_scenario_instruction,
     get_scenario_label,
+    get_scenario_starter_hint,
 )
 
 load_dotenv()
@@ -454,6 +456,14 @@ def build_status_text(user_id: int) -> str:
     )
 
 
+def build_scenario_hint_text(user_id: int) -> str:
+    scenario_key = get_user_scenario(user_id)
+    return (
+        "Быстрый старт по сценарию:\n"
+        f"• {get_scenario_starter_hint(scenario_key)}"
+    )
+
+
 def build_analysis_status_text(user_id: int) -> str:
     mode = get_user_analysis_mode(user_id)
     mode_label = ANALYSIS_MODE_LABELS.get(mode, "Общий")
@@ -658,20 +668,17 @@ async def send_scenario_panel(message: Message):
 
     await message.answer(
         "Режимы и сценарии\n\n"
-        "Сценарий — это контекст, в котором бот будет предлагать варианты ответа.\n\n"
-        "Примеры:\n"
-        "• знакомства\n"
-        "• продажи\n"
-        "• вернуть контакт\n"
-        "• клиентский сервис\n"
-        "• отказ без конфликта\n"
-        "• сложный человек\n\n"
+        "Теперь сценарий — это автопресет:\n"
+        "• он сам подставляет тон\n"
+        "• сам подставляет цель\n"
+        "• сам подставляет количество вариантов\n\n"
         "Выбери сценарий кнопками ниже.\n"
-        "После этого отправляй обычное сообщение — сценарий применится к Модулю 1.",
+        "После этого отправляй обычное сообщение — пресет применится автоматически.",
         reply_markup=build_scenario_keyboard(user_id),
     )
 
     await message.answer(build_status_text(user_id))
+    await message.answer(build_scenario_hint_text(user_id))
 
 
 @dp.message(CommandStart())
@@ -716,6 +723,7 @@ async def cmd_help(message: Message):
     )
 
     await message.answer(build_status_text(user_id))
+    await message.answer(build_scenario_hint_text(user_id))
     await message.answer(build_analysis_status_text(user_id))
     await message.answer(build_dialog_analysis_status_text(user_id))
 
@@ -908,11 +916,23 @@ async def process_scenario_mode(callback: CallbackQuery):
     user_id = callback.from_user.id
     user_scenarios[user_id] = scenario_key
 
-    await callback.answer("Сценарий обновлён")
+    defaults = get_scenario_defaults(scenario_key)
+    state = get_user_module1_state(user_id)
+
+    if defaults["tone"] in TONE_OPTIONS:
+        state["tone"] = defaults["tone"]
+
+    if defaults["goal"] in GOAL_OPTIONS:
+        state["goal"] = defaults["goal"]
+
+    state["variants_count"] = normalize_variants_count(defaults["variants"])
+
+    await callback.answer("Сценарий и автопресет применены")
     await safe_refresh_scenario_markup(callback, user_id)
 
     if callback.message:
         await callback.message.answer(build_status_text(user_id))
+        await callback.message.answer(build_scenario_hint_text(user_id))
 
 
 @dp.callback_query(F.data.startswith("m1_tone:"))
