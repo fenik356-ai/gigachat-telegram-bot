@@ -28,6 +28,14 @@ LEGACY_STYLE_PROMPTS = {
     "short": "очень коротко, по делу и понятно",
 }
 
+ANALYSIS_MODE_INSTRUCTIONS = {
+    "general": "Сделай общий, сбалансированный разбор сообщения.",
+    "meaning": "Сфокусируйся на скрытом смысле, настроении, сомнениях и сигналах.",
+    "risk": "Сфокусируйся на рисках, напряжении, холодности и том, где можно ошибиться.",
+    "before_send": "Смотри на текст как на сообщение перед отправкой: оцени, как оно читается и где риск испортить впечатление.",
+    "reaction": "Сфокусируйся на вероятной реакции собеседника и лучшем следующем шаге.",
+}
+
 
 def _call_gigachat_text(prompt: str) -> str:
     with GigaChat(
@@ -148,6 +156,33 @@ def _parse_module1_response(raw_text: str, variants_count: int) -> dict:
     }
 
 
+def _extract_labeled_block(raw_text: str, label: str, default_value: str) -> str:
+    pattern = rf"{label}\s*:\s*(.*?)(?=\n[A-Z_]+\s*:|\Z)"
+    match = re.search(pattern, raw_text, flags=re.IGNORECASE | re.DOTALL)
+
+    if not match:
+        return default_value
+
+    value = match.group(1).strip()
+    value = re.sub(r"\s+", " ", value).strip()
+
+    if not value:
+        return default_value
+
+    return value
+
+
+def _format_analysis_output(fields: list[tuple[str, str]]) -> str:
+    lines = []
+
+    for title, value in fields:
+        lines.append(f"{title}:")
+        lines.append(f"- {value}")
+        lines.append("")
+
+    return "\n".join(lines).strip()
+
+
 def generate_baseline_reply(user_text: str, dialogue_context: str = "") -> str:
     if not user_text or not user_text.strip():
         return "Пожалуйста, напиши текстовое сообщение."
@@ -171,51 +206,103 @@ def generate_baseline_reply(user_text: str, dialogue_context: str = "") -> str:
     return cleaned
 
 
-def analyze_single_message_v1(message_text: str, dialogue_context: str = "") -> str:
+def analyze_single_message_v2(
+    message_text: str,
+    mode: str = "general",
+    dialogue_context: str = "",
+) -> str:
     if not message_text or not message_text.strip():
         return "Пожалуйста, передай текст для анализа."
 
+    if mode not in ANALYSIS_MODE_INSTRUCTIONS:
+        mode = "general"
+
     context_block = _build_context_block(dialogue_context)
+    mode_instruction = ANALYSIS_MODE_INSTRUCTIONS[mode]
 
     prompt = (
         "Ты сильный аналитик переписки.\n"
         "Нужно разобрать ОДНО сообщение или реплику.\n"
-        "Дай практичный, короткий, полезный разбор.\n\n"
-        "Верни ответ строго в таком формате:\n"
-        "Что, скорее всего, имеется в виду:\n"
-        "- ...\n\n"
-        "Настроение:\n"
-        "- ...\n\n"
-        "Скрытые сигналы:\n"
-        "- ...\n\n"
-        "Где сомнение или холодность:\n"
-        "- ...\n\n"
-        "Как это читается со стороны:\n"
-        "- ...\n\n"
-        "Риски:\n"
-        "- ...\n\n"
-        "Следующий лучший шаг:\n"
-        "- ...\n\n"
-        "Прогноз реакции:\n"
-        "- ...\n\n"
-        "Если это твой текст перед отправкой:\n"
-        "- ...\n\n"
+        f"{mode_instruction}\n\n"
+        "Верни ответ СТРОГО в таком формате:\n"
+        "MEANING: ...\n"
+        "MOOD: ...\n"
+        "SIGNALS: ...\n"
+        "COLDNESS: ...\n"
+        "IMAGE: ...\n"
+        "RISKS: ...\n"
+        "NEXT_STEP: ...\n"
+        "REACTION: ...\n"
+        "BEFORE_SEND: ...\n\n"
         "Правила:\n"
-        "- пиши кратко и по делу\n"
-        "- не уходи в длинные рассуждения\n"
-        "- не добавляй вступление и финальное заключение\n"
-        "- если сигнал слабый, так и скажи\n\n"
+        "- каждый блок заполни одной короткой, практичной формулировкой\n"
+        "- не добавляй вступление\n"
+        "- не добавляй заключение\n"
+        "- если сигнал слабый, скажи это прямо\n\n"
         f"{context_block}"
         f"Анализируемое сообщение: {message_text}"
     )
 
     raw_text = _call_gigachat_text(prompt)
-    cleaned = raw_text.strip()
 
-    if not cleaned:
-        return "Не удалось получить анализ сообщения."
+    parsed = {
+        "MEANING": _extract_labeled_block(raw_text, "MEANING", "Смысл не считывается уверенно."),
+        "MOOD": _extract_labeled_block(raw_text, "MOOD", "Эмоциональный тон неочевиден."),
+        "SIGNALS": _extract_labeled_block(raw_text, "SIGNALS", "Явных скрытых сигналов мало."),
+        "COLDNESS": _extract_labeled_block(raw_text, "COLDNESS", "Сильной холодности не видно."),
+        "IMAGE": _extract_labeled_block(raw_text, "IMAGE", "Образ со стороны выглядит нейтрально."),
+        "RISKS": _extract_labeled_block(raw_text, "RISKS", "Критичных рисков не видно."),
+        "NEXT_STEP": _extract_labeled_block(raw_text, "NEXT_STEP", "Лучше уточнить контекст и ответить спокойно."),
+        "REACTION": _extract_labeled_block(raw_text, "REACTION", "Вероятна сдержанная реакция."),
+        "BEFORE_SEND": _extract_labeled_block(raw_text, "BEFORE_SEND", "Перед отправкой стоит проверить тон и ясность."),
+    }
 
-    return cleaned
+    if mode == "meaning":
+        fields = [
+            ("Что, скорее всего, имеется в виду", parsed["MEANING"]),
+            ("Настроение", parsed["MOOD"]),
+            ("Скрытые сигналы", parsed["SIGNALS"]),
+            ("Где сомнение или холодность", parsed["COLDNESS"]),
+            ("Следующий лучший шаг", parsed["NEXT_STEP"]),
+        ]
+    elif mode == "risk":
+        fields = [
+            ("Риски", parsed["RISKS"]),
+            ("Где сомнение или холодность", parsed["COLDNESS"]),
+            ("Как это читается со стороны", parsed["IMAGE"]),
+            ("Прогноз реакции", parsed["REACTION"]),
+            ("Следующий лучший шаг", parsed["NEXT_STEP"]),
+        ]
+    elif mode == "before_send":
+        fields = [
+            ("Если это твой текст перед отправкой", parsed["BEFORE_SEND"]),
+            ("Как это читается со стороны", parsed["IMAGE"]),
+            ("Риски", parsed["RISKS"]),
+            ("Прогноз реакции", parsed["REACTION"]),
+            ("Следующий лучший шаг", parsed["NEXT_STEP"]),
+        ]
+    elif mode == "reaction":
+        fields = [
+            ("Настроение", parsed["MOOD"]),
+            ("Прогноз реакции", parsed["REACTION"]),
+            ("Скрытые сигналы", parsed["SIGNALS"]),
+            ("Риски", parsed["RISKS"]),
+            ("Следующий лучший шаг", parsed["NEXT_STEP"]),
+        ]
+    else:
+        fields = [
+            ("Что, скорее всего, имеется в виду", parsed["MEANING"]),
+            ("Настроение", parsed["MOOD"]),
+            ("Скрытые сигналы", parsed["SIGNALS"]),
+            ("Где сомнение или холодность", parsed["COLDNESS"]),
+            ("Как это читается со стороны", parsed["IMAGE"]),
+            ("Риски", parsed["RISKS"]),
+            ("Следующий лучший шаг", parsed["NEXT_STEP"]),
+            ("Прогноз реакции", parsed["REACTION"]),
+            ("Если это твой текст перед отправкой", parsed["BEFORE_SEND"]),
+        ]
+
+    return _format_analysis_output(fields)
 
 
 def generate_reply_options_v2(

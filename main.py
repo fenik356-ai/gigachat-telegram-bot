@@ -12,7 +12,7 @@ from aiogram.types import (
 from dotenv import load_dotenv
 
 from gigachat_api import (
-    analyze_single_message_v1,
+    analyze_single_message_v2,
     generate_baseline_reply,
     generate_reply_options_v2,
 )
@@ -38,6 +38,7 @@ dp = Dispatcher()
 
 user_dialogues = {}
 user_module1_settings = {}
+user_analysis_modes = {}
 
 # ключ = (chat_id, message_id)
 result_message_payloads = {}
@@ -45,11 +46,25 @@ result_message_payloads = {}
 MAX_HISTORY_LINES = 6
 MAX_SAVED_RESULTS = 200
 
+ANALYSIS_MODE_LABELS = {
+    "general": "Общий",
+    "meaning": "Смысл",
+    "risk": "Риск",
+    "before_send": "Перед отправкой",
+    "reaction": "Реакция",
+}
+
 
 def get_user_module1_state(user_id: int) -> dict:
     if user_id not in user_module1_settings:
         user_module1_settings[user_id] = get_default_module1_state()
     return user_module1_settings[user_id]
+
+
+def get_user_analysis_mode(user_id: int) -> str:
+    if user_id not in user_analysis_modes:
+        user_analysis_modes[user_id] = "general"
+    return user_analysis_modes[user_id]
 
 
 def add_to_history(user_id: int, speaker: str, text: str):
@@ -181,6 +196,45 @@ def build_module1_keyboard(user_id: int) -> InlineKeyboardMarkup:
     )
 
 
+def build_analysis_keyboard(user_id: int) -> InlineKeyboardMarkup:
+    current_mode = get_user_analysis_mode(user_id)
+
+    def mode_text(key: str) -> str:
+        label = ANALYSIS_MODE_LABELS[key]
+        return f"✅ {label}" if current_mode == key else label
+
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                InlineKeyboardButton(
+                    text=mode_text("general"),
+                    callback_data="an_mode:general",
+                ),
+                InlineKeyboardButton(
+                    text=mode_text("meaning"),
+                    callback_data="an_mode:meaning",
+                ),
+            ],
+            [
+                InlineKeyboardButton(
+                    text=mode_text("risk"),
+                    callback_data="an_mode:risk",
+                ),
+                InlineKeyboardButton(
+                    text=mode_text("before_send"),
+                    callback_data="an_mode:before_send",
+                ),
+            ],
+            [
+                InlineKeyboardButton(
+                    text=mode_text("reaction"),
+                    callback_data="an_mode:reaction",
+                ),
+            ],
+        ]
+    )
+
+
 def build_result_keyboard(variants_count: int) -> InlineKeyboardMarkup:
     rows = [
         [
@@ -231,6 +285,16 @@ def build_status_text(user_id: int) -> str:
         f"• Тон: {tone_label}\n"
         f"• Цель: {get_goal_label(goal_key)}\n"
         f"• Вариантов: {variants_count}"
+    )
+
+
+def build_analysis_status_text(user_id: int) -> str:
+    mode = get_user_analysis_mode(user_id)
+    mode_label = ANALYSIS_MODE_LABELS.get(mode, "Общий")
+
+    return (
+        "Текущий режим анализа:\n"
+        f"• {mode_label}"
     )
 
 
@@ -297,6 +361,18 @@ async def safe_refresh_settings_markup(callback: CallbackQuery, user_id: int):
         pass
 
 
+async def safe_refresh_analysis_markup(callback: CallbackQuery, user_id: int):
+    if not callback.message:
+        return
+
+    try:
+        await callback.message.edit_reply_markup(
+            reply_markup=build_analysis_keyboard(user_id)
+        )
+    except Exception:
+        pass
+
+
 async def safe_remove_result_markup(callback: CallbackQuery):
     if not callback.message:
         return
@@ -326,11 +402,34 @@ async def send_module1_panel(message: Message):
     await message.answer(build_status_text(user_id))
 
 
+async def send_analysis_panel(message: Message):
+    user_id = message.from_user.id
+    get_user_analysis_mode(user_id)
+
+    await message.answer(
+        "Аналитика одного сообщения\n\n"
+        "Доступные режимы:\n"
+        "• Общий — полный разбор\n"
+        "• Смысл — скрытый смысл и сигналы\n"
+        "• Риск — риск, холодность, ошибки\n"
+        "• Перед отправкой — как выглядит твой текст\n"
+        "• Реакция — что вероятнее всего ответят\n\n"
+        "Выбери режим кнопками ниже.\n"
+        "Потом отправь:\n"
+        "• /analyze ваш текст\n"
+        "или ответь командой /analyze на сообщение.",
+        reply_markup=build_analysis_keyboard(user_id),
+    )
+
+    await message.answer(build_analysis_status_text(user_id))
+
+
 @dp.message(CommandStart())
 async def cmd_start(message: Message):
     user_id = message.from_user.id
     user_dialogues[user_id] = []
     user_module1_settings[user_id] = get_default_module1_state()
+    user_analysis_modes[user_id] = "general"
     await send_module1_panel(message)
 
 
@@ -338,12 +437,14 @@ async def cmd_start(message: Message):
 async def cmd_help(message: Message):
     user_id = message.from_user.id
     get_user_module1_state(user_id)
+    get_user_analysis_mode(user_id)
 
     await message.answer(
         "Доступные режимы:\n\n"
         "• /ping — проверить Telegram\n"
         "• /base ваш текст — один базовый ответ от GigaChat\n"
         "• /reply — открыть панель Модуля 1\n"
+        "• /analyze — открыть панель аналитики\n"
         "• /analyze ваш текст — разобрать одно сообщение\n"
         "• можно ответить командой /analyze на чужое сообщение\n"
         "• обычное сообщение — Модуль 1 (варианты + лучший вариант)\n\n"
@@ -358,6 +459,7 @@ async def cmd_help(message: Message):
     )
 
     await message.answer(build_status_text(user_id))
+    await message.answer(build_analysis_status_text(user_id))
 
 
 @dp.message(Command("reply"))
@@ -414,26 +516,26 @@ async def cmd_analyze(message: Message):
     source_text = extract_command_payload_or_reply_text(message)
 
     if not source_text:
-        await message.answer(
-            "Использование:\n"
-            "/analyze ваш текст\n\n"
-            "Или ответь командой /analyze на сообщение, которое хочешь разобрать."
-        )
+        await send_analysis_panel(message)
         return
 
     user_id = message.from_user.id
     dialogue_context = get_dialogue_context(user_id)
+    mode = get_user_analysis_mode(user_id)
 
     await message.answer("Анализирую сообщение...")
 
     try:
         analysis_text = await asyncio.to_thread(
-            analyze_single_message_v1,
+            analyze_single_message_v2,
             source_text,
+            mode,
             dialogue_context,
         )
 
-        await message.answer(f"Разбор сообщения:\n\n{analysis_text}")
+        await message.answer(
+            f"Режим анализа: {ANALYSIS_MODE_LABELS.get(mode, 'Общий')}\n\n{analysis_text}"
+        )
 
     except Exception as e:
         print(f"Ошибка анализа сообщения: {e}")
@@ -448,6 +550,28 @@ async def cmd_reset(message: Message):
     user_id = message.from_user.id
     user_dialogues[user_id] = []
     await message.answer("Готово. Память диалога очищена.")
+
+
+@dp.callback_query(F.data.startswith("an_mode:"))
+async def process_analysis_mode(callback: CallbackQuery):
+    if not callback.data:
+        await callback.answer("Не удалось определить режим")
+        return
+
+    mode = callback.data.split(":", 1)[1]
+
+    if mode not in ANALYSIS_MODE_LABELS:
+        await callback.answer("Неизвестный режим")
+        return
+
+    user_id = callback.from_user.id
+    user_analysis_modes[user_id] = mode
+
+    await callback.answer("Режим анализа обновлён")
+    await safe_refresh_analysis_markup(callback, user_id)
+
+    if callback.message:
+        await callback.message.answer(build_analysis_status_text(user_id))
 
 
 @dp.callback_query(F.data.startswith("m1_tone:"))
