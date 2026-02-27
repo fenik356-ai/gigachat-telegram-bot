@@ -34,6 +34,8 @@ dp = Dispatcher()
 
 user_dialogues = {}
 user_module1_settings = {}
+
+# ключ = (chat_id, message_id)
 result_message_payloads = {}
 
 MAX_HISTORY_LINES = 6
@@ -60,6 +62,10 @@ def add_to_history(user_id: int, speaker: str, text: str):
 def get_dialogue_context(user_id: int) -> str:
     history = user_dialogues.get(user_id, [])
     return "\n".join(history)
+
+
+def make_result_key(chat_id: int, message_id: int):
+    return (chat_id, message_id)
 
 
 def build_module1_keyboard(user_id: int) -> InlineKeyboardMarkup:
@@ -163,7 +169,11 @@ def build_result_keyboard(variants_count: int) -> InlineKeyboardMarkup:
             InlineKeyboardButton(
                 text="🔁 Перегенерировать",
                 callback_data="m1_regen",
-            )
+            ),
+            InlineKeyboardButton(
+                text="✅ Взять лучший",
+                callback_data="m1_pick_best",
+            ),
         ]
     ]
 
@@ -177,6 +187,15 @@ def build_result_keyboard(variants_count: int) -> InlineKeyboardMarkup:
 
     for i in range(0, len(pick_buttons), 3):
         rows.append(pick_buttons[i:i + 3])
+
+    rows.append(
+        [
+            InlineKeyboardButton(
+                text="🧹 Убрать кнопки",
+                callback_data="m1_close_result",
+            )
+        ]
+    )
 
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
@@ -213,6 +232,7 @@ def format_module1_result(result: dict) -> str:
 
 
 def save_result_payload(
+    chat_id: int,
     message_id: int,
     user_id: int,
     source_text: str,
@@ -222,7 +242,9 @@ def save_result_payload(
     variants_count: int,
     result: dict,
 ):
-    result_message_payloads[message_id] = {
+    key = make_result_key(chat_id, message_id)
+
+    result_message_payloads[key] = {
         "user_id": user_id,
         "source_text": source_text,
         "dialogue_context": dialogue_context,
@@ -240,6 +262,11 @@ def save_result_payload(
         result_message_payloads.pop(oldest_key, None)
 
 
+def get_result_payload(chat_id: int, message_id: int):
+    key = make_result_key(chat_id, message_id)
+    return result_message_payloads.get(key)
+
+
 async def safe_refresh_settings_markup(callback: CallbackQuery, user_id: int):
     if not callback.message:
         return
@@ -249,8 +276,16 @@ async def safe_refresh_settings_markup(callback: CallbackQuery, user_id: int):
             reply_markup=build_module1_keyboard(user_id)
         )
     except Exception:
-        # Если Telegram не дал обновить клавиатуру (например, она не изменилась),
-        # просто молча пропускаем.
+        pass
+
+
+async def safe_remove_result_markup(callback: CallbackQuery):
+    if not callback.message:
+        return
+
+    try:
+        await callback.message.edit_reply_markup(reply_markup=None)
+    except Exception:
         pass
 
 
@@ -294,7 +329,9 @@ async def cmd_help(message: Message):
         "• обычное сообщение — Модуль 1 (варианты + лучший вариант)\n\n"
         "Под ответом Модуля 1:\n"
         "• Перегенерировать\n"
-        "• Взять конкретный вариант\n\n"
+        "• Взять лучший\n"
+        "• Взять конкретный вариант\n"
+        "• Убрать кнопки\n\n"
         "Команды:\n"
         "/reset — очистить память диалога",
         reply_markup=build_module1_keyboard(user_id),
@@ -432,7 +469,10 @@ async def process_module1_regen(callback: CallbackQuery):
         await callback.answer("Не удалось обновить ответ")
         return
 
-    payload = result_message_payloads.get(callback.message.message_id)
+    payload = get_result_payload(
+        callback.message.chat.id,
+        callback.message.message_id,
+    )
 
     if not payload:
         await callback.answer("Старый ответ уже не найден")
@@ -462,15 +502,18 @@ async def process_module1_regen(callback: CallbackQuery):
                 new_text,
                 reply_markup=new_keyboard,
             )
+            target_chat_id = callback.message.chat.id
             target_message_id = callback.message.message_id
         except Exception:
             new_message = await callback.message.answer(
                 new_text,
                 reply_markup=new_keyboard,
             )
+            target_chat_id = new_message.chat.id
             target_message_id = new_message.message_id
 
         save_result_payload(
+            target_chat_id,
             target_message_id,
             payload["user_id"],
             payload["source_text"],
@@ -489,13 +532,40 @@ async def process_module1_regen(callback: CallbackQuery):
         )
 
 
+@dp.callback_query(F.data == "m1_pick_best")
+async def process_module1_pick_best(callback: CallbackQuery):
+    if not callback.message:
+        await callback.answer("Не удалось взять лучший вариант")
+        return
+
+    payload = get_result_payload(
+        callback.message.chat.id,
+        callback.message.message_id,
+    )
+
+    if not payload:
+        await callback.answer("Старый ответ уже не найден")
+        return
+
+    if payload["user_id"] != callback.from_user.id:
+        await callback.answer("Эта кнопка не для вас")
+        return
+
+    await callback.answer("Отправляю лучший вариант")
+
+    await callback.message.answer(payload["best_variant_text"])
+
+
 @dp.callback_query(F.data.startswith("m1_pick:"))
 async def process_module1_pick(callback: CallbackQuery):
     if not callback.message or not callback.data:
         await callback.answer("Не удалось выбрать вариант")
         return
 
-    payload = result_message_payloads.get(callback.message.message_id)
+    payload = get_result_payload(
+        callback.message.chat.id,
+        callback.message.message_id,
+    )
 
     if not payload:
         await callback.answer("Старый ответ уже не найден")
@@ -521,11 +591,28 @@ async def process_module1_pick(callback: CallbackQuery):
 
     chosen_variant = variants[picked_index - 1]
 
-    await callback.answer("Вариант готов")
+    await callback.answer("Отправляю вариант")
 
-    await callback.message.answer(
-        f"Готовый вариант {picked_index}:\n\n{chosen_variant}"
+    await callback.message.answer(chosen_variant)
+
+
+@dp.callback_query(F.data == "m1_close_result")
+async def process_module1_close_result(callback: CallbackQuery):
+    if not callback.message:
+        await callback.answer("Не удалось убрать кнопки")
+        return
+
+    payload = get_result_payload(
+        callback.message.chat.id,
+        callback.message.message_id,
     )
+
+    if payload and payload["user_id"] != callback.from_user.id:
+        await callback.answer("Эта кнопка не для вас")
+        return
+
+    await callback.answer("Кнопки скрыты")
+    await safe_remove_result_markup(callback)
 
 
 @dp.message(F.text.startswith("/"))
@@ -570,6 +657,7 @@ async def handle_text_message(message: Message):
         )
 
         save_result_payload(
+            sent_result_message.chat.id,
             sent_result_message.message_id,
             user_id,
             user_text,
