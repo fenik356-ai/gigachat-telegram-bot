@@ -34,6 +34,12 @@ from scenario_presets import (
     get_scenario_label,
     get_scenario_starter_hint,
 )
+from user_memory import (
+    get_saved_replies,
+    get_user_preset,
+    save_reply_to_memory,
+    save_user_preset,
+)
 
 load_dotenv()
 
@@ -96,6 +102,35 @@ def get_user_scenario(user_id: int) -> str:
     if user_id not in user_scenarios:
         user_scenarios[user_id] = DEFAULT_SCENARIO_KEY
     return user_scenarios[user_id]
+
+
+def apply_saved_preset_if_exists(user_id: int):
+    preset = get_user_preset(user_id)
+
+    if not preset or not isinstance(preset, dict):
+        return False
+
+    state = get_user_module1_state(user_id)
+
+    tone = preset.get("tone")
+    goal = preset.get("goal")
+    variants_count = preset.get("variants_count")
+    scenario = preset.get("scenario")
+
+    if tone in TONE_OPTIONS:
+        state["tone"] = tone
+
+    if goal in GOAL_OPTIONS:
+        state["goal"] = goal
+
+    state["variants_count"] = normalize_variants_count(variants_count)
+
+    if scenario in SCENARIO_OPTIONS:
+        user_scenarios[user_id] = scenario
+    else:
+        user_scenarios[user_id] = DEFAULT_SCENARIO_KEY
+
+    return True
 
 
 def add_to_history(user_id: int, speaker: str, text: str):
@@ -412,7 +447,13 @@ def build_result_keyboard(variants_count: int) -> InlineKeyboardMarkup:
                 text="✅ Взять лучший",
                 callback_data="m1_pick_best",
             ),
-        ]
+        ],
+        [
+            InlineKeyboardButton(
+                text="⭐ Сохранить лучший",
+                callback_data="m1_save_best",
+            ),
+        ],
     ]
 
     pick_buttons = [
@@ -482,6 +523,20 @@ def build_dialog_analysis_status_text(user_id: int) -> str:
         "Текущий режим анализа переписки:\n"
         f"• {mode_label}"
     )
+
+
+def format_saved_replies_text(replies: list[str]) -> str:
+    if not replies:
+        return (
+            "Сохранённые ответы пока пусты.\n\n"
+            "Сначала сгенерируй варианты и нажми кнопку ⭐ Сохранить лучший."
+        )
+
+    lines = ["Сохранённые удачные ответы:"]
+    for index, item in enumerate(replies, start=1):
+        lines.append(f"\n{index}) {item}")
+
+    return "\n".join(lines)
 
 
 def format_module1_result(result: dict) -> str:
@@ -610,7 +665,8 @@ async def send_module1_panel(message: Message):
         "• выбор цели\n"
         "• выбор сценария\n"
         "• рекомендация лучшего варианта\n"
-        "• перегенерация и быстрый выбор готового текста\n\n"
+        "• перегенерация и быстрый выбор готового текста\n"
+        "• сохранение удачных ответов\n\n"
         "Выбери настройки кнопками ниже и отправь сообщение.",
         reply_markup=build_module1_keyboard(user_id),
     )
@@ -689,6 +745,8 @@ async def cmd_start(message: Message):
     user_analysis_modes[user_id] = "general"
     user_dialog_analysis_modes[user_id] = "general"
     user_scenarios[user_id] = DEFAULT_SCENARIO_KEY
+
+    apply_saved_preset_if_exists(user_id)
     await send_module1_panel(message)
 
 
@@ -706,6 +764,9 @@ async def cmd_help(message: Message):
         "• /base ваш текст — один базовый ответ от GigaChat\n"
         "• /reply — открыть панель Модуля 1\n"
         "• /scenario — открыть панель сценариев\n"
+        "• /save_preset — сохранить текущий личный пресет\n"
+        "• /my_preset — показать текущий сохранённый пресет\n"
+        "• /saved — показать сохранённые удачные ответы\n"
         "• /analyze — открыть панель аналитики одного сообщения\n"
         "• /analyze ваш текст — разобрать одно сообщение\n"
         "• /dialog — открыть панель анализа переписки\n"
@@ -715,6 +776,7 @@ async def cmd_help(message: Message):
         "Под ответом Модуля 1:\n"
         "• Перегенерировать\n"
         "• Взять лучший\n"
+        "• Сохранить лучший\n"
         "• Взять конкретный вариант\n"
         "• Убрать кнопки\n\n"
         "Команды:\n"
@@ -736,6 +798,52 @@ async def cmd_reply_panel(message: Message):
 @dp.message(Command("scenario"))
 async def cmd_scenario_panel(message: Message):
     await send_scenario_panel(message)
+
+
+@dp.message(Command("save_preset"))
+async def cmd_save_preset(message: Message):
+    user_id = message.from_user.id
+    state = get_user_module1_state(user_id)
+    scenario_key = get_user_scenario(user_id)
+
+    preset = {
+        "tone": state["tone"],
+        "goal": state["goal"],
+        "variants_count": state["variants_count"],
+        "scenario": scenario_key,
+    }
+
+    save_user_preset(user_id, preset)
+
+    await message.answer(
+        "Личный пресет сохранён.\n\n"
+        f"{build_status_text(user_id)}"
+    )
+
+
+@dp.message(Command("my_preset"))
+async def cmd_my_preset(message: Message):
+    user_id = message.from_user.id
+    has_preset = apply_saved_preset_if_exists(user_id)
+
+    if not has_preset:
+        await message.answer(
+            "Сохранённого пресета пока нет.\n\n"
+            "Сначала настрой бота и используй /save_preset."
+        )
+        return
+
+    await message.answer(
+        "Твой сохранённый пресет загружен.\n\n"
+        f"{build_status_text(user_id)}"
+    )
+
+
+@dp.message(Command("saved"))
+async def cmd_saved(message: Message):
+    user_id = message.from_user.id
+    replies = get_saved_replies(user_id)
+    await message.answer(format_saved_replies_text(replies))
 
 
 @dp.message(Command("ping"))
@@ -1093,6 +1201,43 @@ async def process_module1_pick_best(callback: CallbackQuery):
 
     await callback.answer("Отправляю лучший вариант")
     await callback.message.answer(payload["best_variant_text"])
+
+
+@dp.callback_query(F.data == "m1_save_best")
+async def process_module1_save_best(callback: CallbackQuery):
+    if not callback.message:
+        await callback.answer("Не удалось сохранить")
+        return
+
+    payload = get_result_payload(
+        callback.message.chat.id,
+        callback.message.message_id,
+    )
+
+    if not payload:
+        await callback.answer("Старый ответ уже не найден")
+        return
+
+    if payload["user_id"] != callback.from_user.id:
+        await callback.answer("Эта кнопка не для вас")
+        return
+
+    total = save_reply_to_memory(
+        callback.from_user.id,
+        payload["best_variant_text"],
+    )
+
+    if total == 0:
+        await callback.answer("Не удалось сохранить")
+        return
+
+    await callback.answer("Лучший вариант сохранён")
+
+    if callback.message:
+        await callback.message.answer(
+            f"Готово. Лучший вариант сохранён в личную память.\n\n"
+            f"Сейчас сохранено: {total}"
+        )
 
 
 @dp.callback_query(F.data.startswith("m1_pick:"))
