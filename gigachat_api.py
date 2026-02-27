@@ -171,6 +171,53 @@ def generate_baseline_reply(user_text: str, dialogue_context: str = "") -> str:
     return cleaned
 
 
+def analyze_single_message_v1(message_text: str, dialogue_context: str = "") -> str:
+    if not message_text or not message_text.strip():
+        return "Пожалуйста, передай текст для анализа."
+
+    context_block = _build_context_block(dialogue_context)
+
+    prompt = (
+        "Ты сильный аналитик переписки.\n"
+        "Нужно разобрать ОДНО сообщение или реплику.\n"
+        "Дай практичный, короткий, полезный разбор.\n\n"
+        "Верни ответ строго в таком формате:\n"
+        "Что, скорее всего, имеется в виду:\n"
+        "- ...\n\n"
+        "Настроение:\n"
+        "- ...\n\n"
+        "Скрытые сигналы:\n"
+        "- ...\n\n"
+        "Где сомнение или холодность:\n"
+        "- ...\n\n"
+        "Как это читается со стороны:\n"
+        "- ...\n\n"
+        "Риски:\n"
+        "- ...\n\n"
+        "Следующий лучший шаг:\n"
+        "- ...\n\n"
+        "Прогноз реакции:\n"
+        "- ...\n\n"
+        "Если это твой текст перед отправкой:\n"
+        "- ...\n\n"
+        "Правила:\n"
+        "- пиши кратко и по делу\n"
+        "- не уходи в длинные рассуждения\n"
+        "- не добавляй вступление и финальное заключение\n"
+        "- если сигнал слабый, так и скажи\n\n"
+        f"{context_block}"
+        f"Анализируемое сообщение: {message_text}"
+    )
+
+    raw_text = _call_gigachat_text(prompt)
+    cleaned = raw_text.strip()
+
+    if not cleaned:
+        return "Не удалось получить анализ сообщения."
+
+    return cleaned
+
+
 def generate_reply_options_v2(
     user_text: str,
     variants_count: int = DEFAULT_VARIANTS,

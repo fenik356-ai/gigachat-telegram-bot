@@ -11,7 +11,11 @@ from aiogram.types import (
 )
 from dotenv import load_dotenv
 
-from gigachat_api import generate_baseline_reply, generate_reply_options_v2
+from gigachat_api import (
+    analyze_single_message_v1,
+    generate_baseline_reply,
+    generate_reply_options_v2,
+)
 from module1_reply_presets import (
     DEFAULT_TONE,
     GOAL_OPTIONS,
@@ -66,6 +70,20 @@ def get_dialogue_context(user_id: int) -> str:
 
 def make_result_key(chat_id: int, message_id: int):
     return (chat_id, message_id)
+
+
+def extract_command_payload_or_reply_text(message: Message) -> str:
+    raw_text = message.text or ""
+    parts = raw_text.split(maxsplit=1)
+
+    if len(parts) > 1 and parts[1].strip():
+        return parts[1].strip()
+
+    reply_to = message.reply_to_message
+    if reply_to and reply_to.text and reply_to.text.strip():
+        return reply_to.text.strip()
+
+    return ""
 
 
 def build_module1_keyboard(user_id: int) -> InlineKeyboardMarkup:
@@ -326,6 +344,8 @@ async def cmd_help(message: Message):
         "• /ping — проверить Telegram\n"
         "• /base ваш текст — один базовый ответ от GigaChat\n"
         "• /reply — открыть панель Модуля 1\n"
+        "• /analyze ваш текст — разобрать одно сообщение\n"
+        "• можно ответить командой /analyze на чужое сообщение\n"
         "• обычное сообщение — Модуль 1 (варианты + лучший вариант)\n\n"
         "Под ответом Модуля 1:\n"
         "• Перегенерировать\n"
@@ -352,20 +372,19 @@ async def cmd_ping(message: Message):
 
 @dp.message(Command("base"))
 async def cmd_base(message: Message):
-    raw_text = message.text or ""
-    parts = raw_text.split(maxsplit=1)
+    source_text = extract_command_payload_or_reply_text(message)
 
-    if len(parts) < 2 or not parts[1].strip():
+    if not source_text:
         await message.answer(
             "Использование:\n"
             "/base ваш текст\n\n"
+            "Или ответь командой /base на сообщение.\n\n"
             "Пример:\n"
             "/base Напиши вежливый ответ клиенту, что мы вернёмся завтра."
         )
         return
 
     user_id = message.from_user.id
-    source_text = parts[1].strip()
     dialogue_context = get_dialogue_context(user_id)
 
     await message.answer("Проверяю базовый ответ...")
@@ -387,6 +406,40 @@ async def cmd_base(message: Message):
         await message.answer(
             "Не удалось получить базовый ответ от GigaChat.\n"
             "Проверь ключи и попробуй ещё раз."
+        )
+
+
+@dp.message(Command("analyze"))
+async def cmd_analyze(message: Message):
+    source_text = extract_command_payload_or_reply_text(message)
+
+    if not source_text:
+        await message.answer(
+            "Использование:\n"
+            "/analyze ваш текст\n\n"
+            "Или ответь командой /analyze на сообщение, которое хочешь разобрать."
+        )
+        return
+
+    user_id = message.from_user.id
+    dialogue_context = get_dialogue_context(user_id)
+
+    await message.answer("Анализирую сообщение...")
+
+    try:
+        analysis_text = await asyncio.to_thread(
+            analyze_single_message_v1,
+            source_text,
+            dialogue_context,
+        )
+
+        await message.answer(f"Разбор сообщения:\n\n{analysis_text}")
+
+    except Exception as e:
+        print(f"Ошибка анализа сообщения: {e}")
+        await message.answer(
+            "Не удалось выполнить анализ сообщения.\n"
+            "Попробуй ещё раз чуть позже."
         )
 
 
@@ -552,7 +605,6 @@ async def process_module1_pick_best(callback: CallbackQuery):
         return
 
     await callback.answer("Отправляю лучший вариант")
-
     await callback.message.answer(payload["best_variant_text"])
 
 
@@ -592,7 +644,6 @@ async def process_module1_pick(callback: CallbackQuery):
     chosen_variant = variants[picked_index - 1]
 
     await callback.answer("Отправляю вариант")
-
     await callback.message.answer(chosen_variant)
 
 
