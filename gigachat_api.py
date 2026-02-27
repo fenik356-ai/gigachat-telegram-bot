@@ -22,12 +22,22 @@ if not GIGACHAT_CREDENTIALS:
     raise ValueError("В файле .env не найден GIGACHAT_CREDENTIALS")
 
 
-# Это оставляем для совместимости с текущим рабочим ботом
+# Оставляем для совместимости со старым режимом
 LEGACY_STYLE_PROMPTS = {
     "friendly": "дружелюбно, тепло и просто",
     "formal": "официально, вежливо и аккуратно",
     "short": "очень коротко, по делу и понятно",
 }
+
+
+def _call_gigachat_text(prompt: str) -> str:
+    with GigaChat(
+        credentials=GIGACHAT_CREDENTIALS,
+        scope=GIGACHAT_SCOPE,
+        verify_ssl_certs=False,
+    ) as giga:
+        response = giga.chat(prompt)
+        return response.choices[0].message.content
 
 
 def _clean_variant(text: str) -> str:
@@ -38,24 +48,20 @@ def _clean_variant(text: str) -> str:
 
 
 def _extract_variants(raw_text: str, variants_count: int) -> list[str]:
-    # 1) Пробуем главный разделитель
     parts = [p.strip() for p in raw_text.split("|||")]
     parts = [_clean_variant(p) for p in parts if p.strip()]
 
-    # 2) Если разделитель не сработал — пробуем нумерованные пункты
     if len(parts) < 2:
         numbered_parts = re.split(r"\n?\s*(?=\d+[\).\-\:]\s)", raw_text)
         numbered_parts = [_clean_variant(p) for p in numbered_parts if _clean_variant(p)]
         if len(numbered_parts) >= 2:
             parts = numbered_parts
 
-    # 3) Если всё ещё плохо — пробуем разбить по строкам
     if len(parts) < 2:
         line_parts = [_clean_variant(line) for line in raw_text.splitlines() if _clean_variant(line)]
         if len(line_parts) >= 2:
             parts = line_parts
 
-    # 4) Убираем дубли, сохраняя порядок
     unique_parts = []
     seen = set()
 
@@ -140,6 +146,29 @@ def _parse_module1_response(raw_text: str, variants_count: int) -> dict:
     }
 
 
+def generate_baseline_reply(user_text: str, dialogue_context: str = "") -> str:
+    if not user_text or not user_text.strip():
+        return "Пожалуйста, напиши текстовое сообщение."
+
+    context_block = _build_context_block(dialogue_context)
+
+    prompt = (
+        "Ты полезный помощник по переписке.\n"
+        "Нужно дать один готовый, естественный и уместный ответ на сообщение пользователя.\n"
+        "Верни только сам текст ответа, без пояснений, без нумерации, без вступлений.\n\n"
+        f"{context_block}"
+        f"Сообщение пользователя: {user_text}"
+    )
+
+    raw_text = _call_gigachat_text(prompt)
+    cleaned = _clean_variant(raw_text)
+
+    if not cleaned:
+        return "Не удалось получить корректный базовый ответ."
+
+    return cleaned
+
+
 def generate_reply_options_v2(
     user_text: str,
     variants_count: int = DEFAULT_VARIANTS,
@@ -182,14 +211,7 @@ def generate_reply_options_v2(
         f"Сообщение пользователя: {user_text}"
     )
 
-    with GigaChat(
-        credentials=GIGACHAT_CREDENTIALS,
-        scope=GIGACHAT_SCOPE,
-        verify_ssl_certs=False,
-    ) as giga:
-        response = giga.chat(prompt)
-        raw_text = response.choices[0].message.content
-
+    raw_text = _call_gigachat_text(prompt)
     return _parse_module1_response(raw_text, variants_count)
 
 
@@ -201,7 +223,7 @@ def get_gigachat_response(
 ) -> str:
     """
     Старая совместимая функция.
-    Оставляем её, чтобы текущий бот продолжал работать до следующего шага.
+    Оставляем её, чтобы текущий бот продолжал работать, если где-то ещё используется старый режим.
     """
     if not user_text or not user_text.strip():
         return "Пожалуйста, напиши текстовое сообщение."
@@ -224,13 +246,6 @@ def get_gigachat_response(
         f"Новое сообщение пользователя: {user_text}"
     )
 
-    with GigaChat(
-        credentials=GIGACHAT_CREDENTIALS,
-        scope=GIGACHAT_SCOPE,
-        verify_ssl_certs=False,
-    ) as giga:
-        response = giga.chat(prompt)
-        raw_text = response.choices[0].message.content
-
+    raw_text = _call_gigachat_text(prompt)
     variants = _extract_variants(raw_text, variants_count)
     return _format_numbered_list(variants)

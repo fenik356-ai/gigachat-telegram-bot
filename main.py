@@ -11,11 +11,9 @@ from aiogram.types import (
 )
 from dotenv import load_dotenv
 
-from gigachat_api import generate_reply_options_v2
+from gigachat_api import generate_baseline_reply, generate_reply_options_v2
 from module1_reply_presets import (
-    DEFAULT_GOAL,
     DEFAULT_TONE,
-    DEFAULT_VARIANTS,
     GOAL_OPTIONS,
     TONE_OPTIONS,
     get_default_module1_state,
@@ -40,7 +38,13 @@ user_dialogues = {}
 # Настройки Модуля 1 для каждого пользователя
 user_module1_settings = {}
 
+# Данные уже отправленных ответов бота:
+# ключ = message_id сообщения с вариантами
+# значение = всё, что нужно для перегенерации и выбора варианта
+result_message_payloads = {}
+
 MAX_HISTORY_LINES = 6
+MAX_SAVED_RESULTS = 200
 
 
 def get_user_module1_state(user_id: int) -> dict:
@@ -150,29 +154,38 @@ def build_module1_keyboard(user_id: int) -> InlineKeyboardMarkup:
                 ),
             ],
             [
-                InlineKeyboardButton(
-                    text=variants_text(3),
-                    callback_data="m1_variants:3",
-                ),
-                InlineKeyboardButton(
-                    text=variants_text(4),
-                    callback_data="m1_variants:4",
-                ),
-                InlineKeyboardButton(
-                    text=variants_text(5),
-                    callback_data="m1_variants:5",
-                ),
-                InlineKeyboardButton(
-                    text=variants_text(6),
-                    callback_data="m1_variants:6",
-                ),
-                InlineKeyboardButton(
-                    text=variants_text(7),
-                    callback_data="m1_variants:7",
-                ),
+                InlineKeyboardButton(text=variants_text(3), callback_data="m1_variants:3"),
+                InlineKeyboardButton(text=variants_text(4), callback_data="m1_variants:4"),
+                InlineKeyboardButton(text=variants_text(5), callback_data="m1_variants:5"),
+                InlineKeyboardButton(text=variants_text(6), callback_data="m1_variants:6"),
+                InlineKeyboardButton(text=variants_text(7), callback_data="m1_variants:7"),
             ],
         ]
     )
+
+
+def build_result_keyboard(variants_count: int) -> InlineKeyboardMarkup:
+    rows = [
+        [
+            InlineKeyboardButton(
+                text="🔁 Перегенерировать",
+                callback_data="m1_regen",
+            )
+        ]
+    ]
+
+    pick_buttons = [
+        InlineKeyboardButton(
+            text=f"Взять {index}",
+            callback_data=f"m1_pick:{index}",
+        )
+        for index in range(1, variants_count + 1)
+    ]
+
+    for i in range(0, len(pick_buttons), 3):
+        rows.append(pick_buttons[i:i + 3])
+
+    return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
 def build_status_text(user_id: int) -> str:
@@ -191,6 +204,45 @@ def build_status_text(user_id: int) -> str:
     )
 
 
+def format_module1_result(result: dict) -> str:
+    variants_text = result["formatted_variants"]
+    best_index = result["best_index"]
+    best_reason = result["best_reason"]
+
+    return (
+        f"{variants_text}\n\n"
+        f"Сильнее выглядит вариант {best_index}.\n"
+        f"Почему: {best_reason}"
+    )
+
+
+def save_result_payload(
+    message_id: int,
+    user_id: int,
+    source_text: str,
+    dialogue_context: str,
+    tone_key: str,
+    goal_key: str,
+    variants_count: int,
+    result: dict,
+):
+    result_message_payloads[message_id] = {
+        "user_id": user_id,
+        "source_text": source_text,
+        "dialogue_context": dialogue_context,
+        "tone_key": tone_key,
+        "goal_key": goal_key,
+        "variants_count": variants_count,
+        "variants": result["variants"],
+        "best_index": result["best_index"],
+        "best_reason": result["best_reason"],
+    }
+
+    if len(result_message_payloads) > MAX_SAVED_RESULTS:
+        oldest_key = next(iter(result_message_payloads))
+        result_message_payloads.pop(oldest_key, None)
+
+
 @dp.message(CommandStart())
 async def cmd_start(message: Message):
     user_id = message.from_user.id
@@ -198,12 +250,13 @@ async def cmd_start(message: Message):
     user_module1_settings[user_id] = get_default_module1_state()
 
     await message.answer(
-        "Привет! Это Модуль 1: Мгновенный ответ 2.0.\n\n"
-        "Что умеет бот сейчас:\n"
-        "• генерирует 3–7 вариантов ответа\n"
-        "• меняет тон ответа кнопками\n"
-        "• меняет цель ответа кнопками\n"
-        "• показывает, какой вариант сильнее и почему\n\n"
+        "Привет! База проекта активна.\n\n"
+        "Быстрые команды проверки:\n"
+        "• /ping — Telegram-часть отвечает\n"
+        "• /base ваш текст — один базовый ответ от GigaChat\n\n"
+        "Основной режим:\n"
+        "• Модуль 1 уже включён\n"
+        "• можно выбирать тон, цель и число вариантов\n\n"
         "Выбери настройки кнопками ниже, потом отправь сообщение.",
         reply_markup=build_module1_keyboard(user_id),
     )
@@ -217,18 +270,64 @@ async def cmd_help(message: Message):
     get_user_module1_state(user_id)
 
     await message.answer(
-        "Как пользоваться модулем:\n\n"
-        "1. Нажми кнопки тона\n"
-        "2. Нажми кнопку цели\n"
-        "3. Выбери количество вариантов (3–7)\n"
-        "4. Отправь сообщение\n"
-        "5. Получи варианты + объяснение сильного варианта\n\n"
+        "Доступные режимы:\n\n"
+        "1. /ping — проверить Telegram\n"
+        "2. /base ваш текст — получить один базовый ответ от GigaChat\n"
+        "3. Обычное сообщение — получить Модуль 1 (варианты + лучший вариант)\n\n"
+        "Под ответом Модуля 1 доступны:\n"
+        "• Перегенерировать\n"
+        "• Взять конкретный вариант\n\n"
         "Команды:\n"
         "/reset — очистить память диалога",
         reply_markup=build_module1_keyboard(user_id),
     )
 
     await message.answer(build_status_text(user_id))
+
+
+@dp.message(Command("ping"))
+async def cmd_ping(message: Message):
+    await message.answer("OK: Telegram-часть работает.")
+
+
+@dp.message(Command("base"))
+async def cmd_base(message: Message):
+    raw_text = message.text or ""
+    parts = raw_text.split(maxsplit=1)
+
+    if len(parts) < 2 or not parts[1].strip():
+        await message.answer(
+            "Использование:\n"
+            "/base ваш текст\n\n"
+            "Пример:\n"
+            "/base Напиши вежливый ответ клиенту, что мы вернёмся завтра."
+        )
+        return
+
+    user_id = message.from_user.id
+    source_text = parts[1].strip()
+    dialogue_context = get_dialogue_context(user_id)
+
+    await message.answer("Проверяю базовый ответ...")
+
+    try:
+        reply_text = await asyncio.to_thread(
+            generate_baseline_reply,
+            source_text,
+            dialogue_context,
+        )
+
+        await message.answer(f"Базовый ответ:\n\n{reply_text}")
+
+        add_to_history(user_id, "Пользователь", source_text)
+        add_to_history(user_id, "Бот", reply_text)
+
+    except Exception as e:
+        print(f"Ошибка базового режима: {e}")
+        await message.answer(
+            "Не удалось получить базовый ответ от GigaChat.\n"
+            "Проверь ключи и попробуй ещё раз."
+        )
 
 
 @dp.message(Command("reset"))
@@ -310,6 +409,108 @@ async def process_module1_variants(callback: CallbackQuery):
         await callback.message.answer(build_status_text(user_id))
 
 
+@dp.callback_query(F.data == "m1_regen")
+async def process_module1_regen(callback: CallbackQuery):
+    if not callback.message:
+        await callback.answer("Не удалось обновить ответ")
+        return
+
+    payload = result_message_payloads.get(callback.message.message_id)
+
+    if not payload:
+        await callback.answer("Старый ответ уже не найден")
+        return
+
+    if payload["user_id"] != callback.from_user.id:
+        await callback.answer("Эта кнопка не для вас")
+        return
+
+    await callback.answer("Перегенерирую...")
+
+    try:
+        new_result = await asyncio.to_thread(
+            generate_reply_options_v2,
+            payload["source_text"],
+            payload["variants_count"],
+            payload["tone_key"],
+            payload["goal_key"],
+            payload["dialogue_context"],
+        )
+
+        new_text = format_module1_result(new_result)
+        new_keyboard = build_result_keyboard(len(new_result["variants"]))
+
+        try:
+            await callback.message.edit_text(
+                new_text,
+                reply_markup=new_keyboard,
+            )
+            target_message_id = callback.message.message_id
+        except Exception:
+            new_message = await callback.message.answer(
+                new_text,
+                reply_markup=new_keyboard,
+            )
+            target_message_id = new_message.message_id
+
+        save_result_payload(
+            target_message_id,
+            payload["user_id"],
+            payload["source_text"],
+            payload["dialogue_context"],
+            payload["tone_key"],
+            payload["goal_key"],
+            payload["variants_count"],
+            new_result,
+        )
+
+    except Exception as e:
+        print(f"Ошибка перегенерации: {e}")
+        await callback.message.answer(
+            "Не удалось перегенерировать ответ.\n"
+            "Попробуй ещё раз чуть позже."
+        )
+
+
+@dp.callback_query(F.data.startswith("m1_pick:"))
+async def process_module1_pick(callback: CallbackQuery):
+    if not callback.message or not callback.data:
+        await callback.answer("Не удалось выбрать вариант")
+        return
+
+    payload = result_message_payloads.get(callback.message.message_id)
+
+    if not payload:
+        await callback.answer("Старый ответ уже не найден")
+        return
+
+    if payload["user_id"] != callback.from_user.id:
+        await callback.answer("Эта кнопка не для вас")
+        return
+
+    raw_index = callback.data.split(":", 1)[1]
+
+    try:
+        picked_index = int(raw_index)
+    except ValueError:
+        await callback.answer("Неверный номер варианта")
+        return
+
+    variants = payload["variants"]
+
+    if picked_index < 1 or picked_index > len(variants):
+        await callback.answer("Вариант не найден")
+        return
+
+    chosen_variant = variants[picked_index - 1]
+
+    await callback.answer("Вариант готов")
+
+    await callback.message.answer(
+        f"Готовый вариант {picked_index}:\n\n{chosen_variant}"
+    )
+
+
 @dp.message(F.text.startswith("/"))
 async def unknown_command(message: Message):
     await message.answer("Неизвестная команда. Используй /help")
@@ -343,21 +544,28 @@ async def handle_text_message(message: Message):
             dialogue_context,
         )
 
-        variants_text = result["formatted_variants"]
-        best_index = result["best_index"]
-        best_reason = result["best_reason"]
+        final_text = format_module1_result(result)
+        result_keyboard = build_result_keyboard(len(result["variants"]))
 
-        final_text = (
-            f"{variants_text}\n\n"
-            f"Сильнее выглядит вариант {best_index}.\n"
-            f"Почему: {best_reason}"
+        sent_result_message = await message.answer(
+            final_text,
+            reply_markup=result_keyboard,
         )
 
-        await message.answer(final_text)
+        save_result_payload(
+            sent_result_message.message_id,
+            user_id,
+            user_text,
+            dialogue_context,
+            tone_key,
+            goal_key,
+            variants_count,
+            result,
+        )
 
         add_to_history(user_id, "Пользователь", user_text)
 
-        best_variant_text = result["variants"][best_index - 1]
+        best_variant_text = result["variants"][result["best_index"] - 1]
         add_to_history(user_id, "Бот", best_variant_text)
 
     except Exception as e:
