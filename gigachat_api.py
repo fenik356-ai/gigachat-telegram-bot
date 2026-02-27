@@ -305,6 +305,61 @@ def analyze_single_message_v2(
     return _format_analysis_output(fields)
 
 
+def analyze_dialog_v1(dialog_text: str, dialogue_context: str = "") -> str:
+    if not dialog_text or not dialog_text.strip():
+        return "Пожалуйста, передай текст переписки для анализа."
+
+    context_block = _build_context_block(dialogue_context)
+
+    prompt = (
+        "Ты сильный аналитик переписки.\n"
+        "Нужно разобрать диалог целиком, а не одно сообщение.\n"
+        "Смотри на динамику разговора, вклад сторон, провалы, интерес и ошибки.\n\n"
+        "Верни ответ СТРОГО в таком формате:\n"
+        "BALANCE: ...\n"
+        "LEAD: ...\n"
+        "INTEREST_DROP: ...\n"
+        "PUSHINESS: ...\n"
+        "DRYNESS: ...\n"
+        "BEST_MESSAGES: ...\n"
+        "WHAT_WENT_WRONG: ...\n"
+        "NEXT_STEP: ...\n\n"
+        "Правила:\n"
+        "- каждый блок заполни одной короткой, практичной формулировкой\n"
+        "- не добавляй вступление\n"
+        "- не добавляй заключение\n"
+        "- если вывод слабый, так и скажи\n\n"
+        f"{context_block}"
+        f"Анализируемая переписка:\n{dialog_text}"
+    )
+
+    raw_text = _call_gigachat_text(prompt)
+
+    parsed = {
+        "BALANCE": _extract_labeled_block(raw_text, "BALANCE", "Баланс вклада сторон считывается неуверенно."),
+        "LEAD": _extract_labeled_block(raw_text, "LEAD", "Неочевидно, кто стабильно ведёт разговор."),
+        "INTEREST_DROP": _extract_labeled_block(raw_text, "INTEREST_DROP", "Явный момент падения интереса не выделяется."),
+        "PUSHINESS": _extract_labeled_block(raw_text, "PUSHINESS", "Навязчивость выражена слабо или неочевидно."),
+        "DRYNESS": _extract_labeled_block(raw_text, "DRYNESS", "Сильной сухости не видно или она не доминирует."),
+        "BEST_MESSAGES": _extract_labeled_block(raw_text, "BEST_MESSAGES", "Самые сильные сообщения не выделяются уверенно."),
+        "WHAT_WENT_WRONG": _extract_labeled_block(raw_text, "WHAT_WENT_WRONG", "Явный провал не считывается уверенно."),
+        "NEXT_STEP": _extract_labeled_block(raw_text, "NEXT_STEP", "Лучше выбрать спокойный, не давящий следующий шаг."),
+    }
+
+    fields = [
+        ("Кто вкладывается больше", parsed["BALANCE"]),
+        ("Кто ведёт разговор", parsed["LEAD"]),
+        ("Где падает интерес", parsed["INTEREST_DROP"]),
+        ("Где ты выглядишь навязчиво", parsed["PUSHINESS"]),
+        ("Где ты выглядишь слишком сухо", parsed["DRYNESS"]),
+        ("Какие сообщения сработали лучше", parsed["BEST_MESSAGES"]),
+        ("Что, скорее всего, пошло не так", parsed["WHAT_WENT_WRONG"]),
+        ("Следующий лучший шаг", parsed["NEXT_STEP"]),
+    ]
+
+    return _format_analysis_output(fields)
+
+
 def generate_reply_options_v2(
     user_text: str,
     variants_count: int = DEFAULT_VARIANTS,

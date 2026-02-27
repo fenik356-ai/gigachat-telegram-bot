@@ -12,6 +12,7 @@ from aiogram.types import (
 from dotenv import load_dotenv
 
 from gigachat_api import (
+    analyze_dialog_v1,
     analyze_single_message_v2,
     generate_baseline_reply,
     generate_reply_options_v2,
@@ -444,9 +445,11 @@ async def cmd_help(message: Message):
         "• /ping — проверить Telegram\n"
         "• /base ваш текст — один базовый ответ от GigaChat\n"
         "• /reply — открыть панель Модуля 1\n"
-        "• /analyze — открыть панель аналитики\n"
+        "• /analyze — открыть панель аналитики одного сообщения\n"
         "• /analyze ваш текст — разобрать одно сообщение\n"
-        "• можно ответить командой /analyze на чужое сообщение\n"
+        "• /dialog — разобрать переписку целиком\n"
+        "• /dialog ваш_диалог — анализ всей переписки\n"
+        "• можно ответить /analyze или /dialog на текстовое сообщение\n"
         "• обычное сообщение — Модуль 1 (варианты + лучший вариант)\n\n"
         "Под ответом Модуля 1:\n"
         "• Перегенерировать\n"
@@ -541,6 +544,44 @@ async def cmd_analyze(message: Message):
         print(f"Ошибка анализа сообщения: {e}")
         await message.answer(
             "Не удалось выполнить анализ сообщения.\n"
+            "Попробуй ещё раз чуть позже."
+        )
+
+
+@dp.message(Command("dialog"))
+async def cmd_dialog(message: Message):
+    dialog_text = extract_command_payload_or_reply_text(message)
+
+    if not dialog_text:
+        await message.answer(
+            "Использование:\n"
+            "/dialog текст переписки целиком\n\n"
+            "Или ответь командой /dialog на сообщение, в котором уже вставлена переписка.\n\n"
+            "Лучше вставлять диалог в формате:\n"
+            "Я: ...\n"
+            "Он(а): ...\n"
+            "Я: ..."
+        )
+        return
+
+    user_id = message.from_user.id
+    dialogue_context = get_dialogue_context(user_id)
+
+    await message.answer("Разбираю переписку целиком...")
+
+    try:
+        analysis_text = await asyncio.to_thread(
+            analyze_dialog_v1,
+            dialog_text,
+            dialogue_context,
+        )
+
+        await message.answer(f"Разбор переписки:\n\n{analysis_text}")
+
+    except Exception as e:
+        print(f"Ошибка анализа переписки: {e}")
+        await message.answer(
+            "Не удалось выполнить анализ переписки.\n"
             "Попробуй ещё раз чуть позже."
         )
 
