@@ -36,6 +36,14 @@ ANALYSIS_MODE_INSTRUCTIONS = {
     "reaction": "Сфокусируйся на вероятной реакции собеседника и лучшем следующем шаге.",
 }
 
+DIALOG_ANALYSIS_MODE_INSTRUCTIONS = {
+    "general": "Сделай общий разбор диалога целиком: динамика, баланс, ошибки и лучший следующий шаг.",
+    "dynamics": "Сфокусируйся на динамике разговора: кто ведёт, кто вкладывается больше, где разговор проседает.",
+    "interest": "Сфокусируйся на интересе: где интерес падает, какие сообщения сработали лучше, насколько жив контакт сейчас.",
+    "mistakes": "Сфокусируйся на ошибках: где есть навязчивость, сухость, давление и что пошло не так.",
+    "next_step": "Сфокусируйся на текущем состоянии контакта и на самом сильном следующем шаге.",
+}
+
 
 def _call_gigachat_text(prompt: str) -> str:
     with GigaChat(
@@ -305,16 +313,24 @@ def analyze_single_message_v2(
     return _format_analysis_output(fields)
 
 
-def analyze_dialog_v1(dialog_text: str, dialogue_context: str = "") -> str:
+def analyze_dialog_v2(
+    dialog_text: str,
+    mode: str = "general",
+    dialogue_context: str = "",
+) -> str:
     if not dialog_text or not dialog_text.strip():
         return "Пожалуйста, передай текст переписки для анализа."
 
+    if mode not in DIALOG_ANALYSIS_MODE_INSTRUCTIONS:
+        mode = "general"
+
     context_block = _build_context_block(dialogue_context)
+    mode_instruction = DIALOG_ANALYSIS_MODE_INSTRUCTIONS[mode]
 
     prompt = (
         "Ты сильный аналитик переписки.\n"
         "Нужно разобрать диалог целиком, а не одно сообщение.\n"
-        "Смотри на динамику разговора, вклад сторон, провалы, интерес и ошибки.\n\n"
+        f"{mode_instruction}\n\n"
         "Верни ответ СТРОГО в таком формате:\n"
         "BALANCE: ...\n"
         "LEAD: ...\n"
@@ -323,6 +339,7 @@ def analyze_dialog_v1(dialog_text: str, dialogue_context: str = "") -> str:
         "DRYNESS: ...\n"
         "BEST_MESSAGES: ...\n"
         "WHAT_WENT_WRONG: ...\n"
+        "STATE_NOW: ...\n"
         "NEXT_STEP: ...\n\n"
         "Правила:\n"
         "- каждый блок заполни одной короткой, практичной формулировкой\n"
@@ -343,21 +360,60 @@ def analyze_dialog_v1(dialog_text: str, dialogue_context: str = "") -> str:
         "DRYNESS": _extract_labeled_block(raw_text, "DRYNESS", "Сильной сухости не видно или она не доминирует."),
         "BEST_MESSAGES": _extract_labeled_block(raw_text, "BEST_MESSAGES", "Самые сильные сообщения не выделяются уверенно."),
         "WHAT_WENT_WRONG": _extract_labeled_block(raw_text, "WHAT_WENT_WRONG", "Явный провал не считывается уверенно."),
+        "STATE_NOW": _extract_labeled_block(raw_text, "STATE_NOW", "Текущее состояние контакта считывается неуверенно."),
         "NEXT_STEP": _extract_labeled_block(raw_text, "NEXT_STEP", "Лучше выбрать спокойный, не давящий следующий шаг."),
     }
 
-    fields = [
-        ("Кто вкладывается больше", parsed["BALANCE"]),
-        ("Кто ведёт разговор", parsed["LEAD"]),
-        ("Где падает интерес", parsed["INTEREST_DROP"]),
-        ("Где ты выглядишь навязчиво", parsed["PUSHINESS"]),
-        ("Где ты выглядишь слишком сухо", parsed["DRYNESS"]),
-        ("Какие сообщения сработали лучше", parsed["BEST_MESSAGES"]),
-        ("Что, скорее всего, пошло не так", parsed["WHAT_WENT_WRONG"]),
-        ("Следующий лучший шаг", parsed["NEXT_STEP"]),
-    ]
+    if mode == "dynamics":
+        fields = [
+            ("Кто вкладывается больше", parsed["BALANCE"]),
+            ("Кто ведёт разговор", parsed["LEAD"]),
+            ("Где падает интерес", parsed["INTEREST_DROP"]),
+            ("Текущее состояние контакта", parsed["STATE_NOW"]),
+            ("Следующий лучший шаг", parsed["NEXT_STEP"]),
+        ]
+    elif mode == "interest":
+        fields = [
+            ("Где падает интерес", parsed["INTEREST_DROP"]),
+            ("Какие сообщения сработали лучше", parsed["BEST_MESSAGES"]),
+            ("Текущее состояние контакта", parsed["STATE_NOW"]),
+            ("Что, скорее всего, пошло не так", parsed["WHAT_WENT_WRONG"]),
+            ("Следующий лучший шаг", parsed["NEXT_STEP"]),
+        ]
+    elif mode == "mistakes":
+        fields = [
+            ("Где ты выглядишь навязчиво", parsed["PUSHINESS"]),
+            ("Где ты выглядишь слишком сухо", parsed["DRYNESS"]),
+            ("Что, скорее всего, пошло не так", parsed["WHAT_WENT_WRONG"]),
+            ("Текущее состояние контакта", parsed["STATE_NOW"]),
+            ("Следующий лучший шаг", parsed["NEXT_STEP"]),
+        ]
+    elif mode == "next_step":
+        fields = [
+            ("Текущее состояние контакта", parsed["STATE_NOW"]),
+            ("Где падает интерес", parsed["INTEREST_DROP"]),
+            ("Что, скорее всего, пошло не так", parsed["WHAT_WENT_WRONG"]),
+            ("Какие сообщения сработали лучше", parsed["BEST_MESSAGES"]),
+            ("Следующий лучший шаг", parsed["NEXT_STEP"]),
+        ]
+    else:
+        fields = [
+            ("Кто вкладывается больше", parsed["BALANCE"]),
+            ("Кто ведёт разговор", parsed["LEAD"]),
+            ("Где падает интерес", parsed["INTEREST_DROP"]),
+            ("Где ты выглядишь навязчиво", parsed["PUSHINESS"]),
+            ("Где ты выглядишь слишком сухо", parsed["DRYNESS"]),
+            ("Какие сообщения сработали лучше", parsed["BEST_MESSAGES"]),
+            ("Что, скорее всего, пошло не так", parsed["WHAT_WENT_WRONG"]),
+            ("Текущее состояние контакта", parsed["STATE_NOW"]),
+            ("Следующий лучший шаг", parsed["NEXT_STEP"]),
+        ]
 
     return _format_analysis_output(fields)
+
+
+def analyze_dialog_v1(dialog_text: str, dialogue_context: str = "") -> str:
+    return analyze_dialog_v2(dialog_text, "general", dialogue_context)
 
 
 def generate_reply_options_v2(
