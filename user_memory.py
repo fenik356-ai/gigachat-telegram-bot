@@ -8,10 +8,160 @@ MEMORY_FILE = Path(__file__).resolve().parent / "user_memory.json"
 _LOCK = Lock()
 APP_TIMEZONE = ZoneInfo("America/Chicago")
 
+MAX_SAVED_REPLIES = 10
+MAX_REPLY_LENGTH = 1200
+MAX_ACTIVITY_DATES = 120
+
 
 def _ensure_file_exists():
     if not MEMORY_FILE.exists():
         MEMORY_FILE.write_text("{}", encoding="utf-8")
+
+
+def _backup_corrupted_file():
+    if not MEMORY_FILE.exists():
+        return
+
+    timestamp = datetime.now(APP_TIMEZONE).strftime("%Y%m%d_%H%M%S")
+    backup_path = MEMORY_FILE.with_name(f"user_memory.corrupted_{timestamp}.json")
+
+    try:
+        MEMORY_FILE.replace(backup_path)
+    except Exception:
+        pass
+
+
+def _normalize_activity_dates(raw_dates: list) -> list[str]:
+    clean_dates = []
+
+    for item in raw_dates:
+        value = str(item).strip()
+        if not value:
+            continue
+
+        try:
+            date.fromisoformat(value)
+            clean_dates.append(value)
+        except ValueError:
+            continue
+
+    clean_dates = sorted(set(clean_dates))
+    return clean_dates[-MAX_ACTIVITY_DATES:]
+
+
+def _sanitize_saved_replies(raw_replies) -> list[str]:
+    if not isinstance(raw_replies, list):
+        return []
+
+    cleaned = []
+    seen = set()
+
+    for item in raw_replies:
+        text = " ".join(str(item).split()).strip()
+
+        if not text:
+            continue
+
+        if len(text) > MAX_REPLY_LENGTH:
+            text = text[:MAX_REPLY_LENGTH] + "..."
+
+        if text in seen:
+            continue
+
+        seen.add(text)
+        cleaned.append(text)
+
+        if len(cleaned) >= MAX_SAVED_REPLIES:
+            break
+
+    return cleaned
+
+
+def _sanitize_preset(raw_preset):
+    if not isinstance(raw_preset, dict):
+        return None
+
+    return {
+        "tone": raw_preset.get("tone"),
+        "goal": raw_preset.get("goal"),
+        "variants_count": raw_preset.get("variants_count"),
+        "scenario": raw_preset.get("scenario"),
+    }
+
+
+def _sanitize_stats(raw_stats) -> dict:
+    if not isinstance(raw_stats, dict):
+        raw_stats = {}
+
+    stats = {
+        "activity_dates": _normalize_activity_dates(raw_stats.get("activity_dates", [])),
+        "generation_count": 0,
+        "analysis_count": 0,
+        "dialog_count": 0,
+        "saved_count": 0,
+        "coach_view_count": 0,
+    }
+
+    for key in [
+        "generation_count",
+        "analysis_count",
+        "dialog_count",
+        "saved_count",
+        "coach_view_count",
+    ]:
+        try:
+            value = int(raw_stats.get(key, 0))
+            stats[key] = max(0, value)
+        except (TypeError, ValueError):
+            stats[key] = 0
+
+    return stats
+
+
+def _default_user_bucket() -> dict:
+    return {
+        "preset": None,
+        "saved_replies": [],
+        "stats": _sanitize_stats({}),
+    }
+
+
+def _sanitize_user_bucket(raw_bucket) -> dict:
+    if not isinstance(raw_bucket, dict):
+        return _default_user_bucket()
+
+    return {
+        "preset": _sanitize_preset(raw_bucket.get("preset")),
+        "saved_replies": _sanitize_saved_replies(raw_bucket.get("saved_replies", [])),
+        "stats": _sanitize_stats(raw_bucket.get("stats", {})),
+    }
+
+
+def _sanitize_memory_data(raw_data) -> dict:
+    if not isinstance(raw_data, dict):
+        return {}
+
+    clean_data = {}
+
+    for raw_user_id, raw_bucket in raw_data.items():
+        user_id = str(raw_user_id).strip()
+
+        if not user_id:
+            continue
+
+        clean_data[user_id] = _sanitize_user_bucket(raw_bucket)
+
+    return clean_data
+
+
+def _atomic_write_json(data: dict):
+    temp_path = MEMORY_FILE.with_suffix(".tmp")
+
+    temp_path.write_text(
+        json.dumps(data, ensure_ascii=False, indent=2),
+        encoding="utf-8",
+    )
+    temp_path.replace(MEMORY_FILE)
 
 
 def _load_memory() -> dict:
@@ -19,21 +169,25 @@ def _load_memory() -> dict:
 
     try:
         raw = MEMORY_FILE.read_text(encoding="utf-8").strip()
+
         if not raw:
             return {}
-        data = json.loads(raw)
-        if isinstance(data, dict):
-            return data
+
+        parsed = json.loads(raw)
+        return _sanitize_memory_data(parsed)
+
+    except json.JSONDecodeError:
+        _backup_corrupted_file()
+        _ensure_file_exists()
         return {}
+
     except Exception:
         return {}
 
 
 def _save_memory(data: dict):
-    MEMORY_FILE.write_text(
-        json.dumps(data, ensure_ascii=False, indent=2),
-        encoding="utf-8",
-    )
+    safe_data = _sanitize_memory_data(data)
+    _atomic_write_json(safe_data)
 
 
 def _today_str() -> str:
@@ -44,76 +198,11 @@ def _get_user_bucket(data: dict, user_id: int) -> dict:
     key = str(user_id)
 
     if key not in data or not isinstance(data[key], dict):
-        data[key] = {
-            "preset": None,
-            "saved_replies": [],
-            "stats": {},
-        }
-
-    if "preset" not in data[key]:
-        data[key]["preset"] = None
-
-    if "saved_replies" not in data[key] or not isinstance(data[key]["saved_replies"], list):
-        data[key]["saved_replies"] = []
-
-    if "stats" not in data[key] or not isinstance(data[key]["stats"], dict):
-        data[key]["stats"] = {}
+        data[key] = _default_user_bucket()
+    else:
+        data[key] = _sanitize_user_bucket(data[key])
 
     return data[key]
-
-
-def _get_stats_bucket(bucket: dict) -> dict:
-    stats = bucket.get("stats")
-
-    if not isinstance(stats, dict):
-        stats = {}
-        bucket["stats"] = stats
-
-    defaults = {
-        "activity_dates": [],
-        "generation_count": 0,
-        "analysis_count": 0,
-        "dialog_count": 0,
-        "saved_count": 0,
-        "coach_view_count": 0,
-    }
-
-    for key, default_value in defaults.items():
-        if key not in stats:
-            stats[key] = default_value
-
-    if not isinstance(stats["activity_dates"], list):
-        stats["activity_dates"] = []
-
-    for int_key in [
-        "generation_count",
-        "analysis_count",
-        "dialog_count",
-        "saved_count",
-        "coach_view_count",
-    ]:
-        try:
-            stats[int_key] = int(stats.get(int_key, 0))
-        except (TypeError, ValueError):
-            stats[int_key] = 0
-
-    return stats
-
-
-def _normalize_activity_dates(raw_dates: list) -> list[str]:
-    clean_dates = []
-
-    for item in raw_dates:
-        value = str(item).strip()
-        if not value:
-            continue
-        try:
-            date.fromisoformat(value)
-            clean_dates.append(value)
-        except ValueError:
-            continue
-
-    return sorted(set(clean_dates))
 
 
 def _calculate_streaks(activity_dates: list[str]) -> tuple[int, int]:
@@ -190,22 +279,21 @@ def _build_achievements(stats: dict, saved_replies_count: int) -> list[str]:
 
 
 def _build_engagement_stats(bucket: dict) -> dict:
-    stats = _get_stats_bucket(bucket)
-    activity_dates = _normalize_activity_dates(stats.get("activity_dates", []))
-    stats["activity_dates"] = activity_dates
+    bucket = _sanitize_user_bucket(bucket)
+    stats = bucket["stats"]
+    saved_replies = bucket["saved_replies"]
 
-    current_streak, best_streak = _calculate_streaks(activity_dates)
-    saved_replies = [str(item).strip() for item in bucket.get("saved_replies", []) if str(item).strip()]
+    current_streak, best_streak = _calculate_streaks(stats["activity_dates"])
 
     result = {
-        "total_active_days": len(activity_dates),
+        "total_active_days": len(stats["activity_dates"]),
         "current_streak": current_streak,
         "best_streak": best_streak,
-        "generation_count": int(stats.get("generation_count", 0)),
-        "analysis_count": int(stats.get("analysis_count", 0)),
-        "dialog_count": int(stats.get("dialog_count", 0)),
-        "saved_count": int(stats.get("saved_count", 0)),
-        "coach_view_count": int(stats.get("coach_view_count", 0)),
+        "generation_count": stats["generation_count"],
+        "analysis_count": stats["analysis_count"],
+        "dialog_count": stats["dialog_count"],
+        "saved_count": stats["saved_count"],
+        "coach_view_count": stats["coach_view_count"],
         "saved_replies_count": len(saved_replies),
     }
 
@@ -217,6 +305,7 @@ def get_user_preset(user_id: int):
     with _LOCK:
         data = _load_memory()
         bucket = _get_user_bucket(data, user_id)
+        _save_memory(data)
         return bucket.get("preset")
 
 
@@ -224,12 +313,7 @@ def save_user_preset(user_id: int, preset: dict):
     with _LOCK:
         data = _load_memory()
         bucket = _get_user_bucket(data, user_id)
-        bucket["preset"] = {
-            "tone": preset.get("tone"),
-            "goal": preset.get("goal"),
-            "variants_count": preset.get("variants_count"),
-            "scenario": preset.get("scenario"),
-        }
+        bucket["preset"] = _sanitize_preset(preset)
         _save_memory(data)
 
 
@@ -237,9 +321,8 @@ def get_saved_replies(user_id: int) -> list[str]:
     with _LOCK:
         data = _load_memory()
         bucket = _get_user_bucket(data, user_id)
-        replies = bucket.get("saved_replies", [])
-        clean_replies = [str(item).strip() for item in replies if str(item).strip()]
-        return clean_replies
+        _save_memory(data)
+        return list(bucket["saved_replies"])
 
 
 def save_reply_to_memory(user_id: int, reply_text: str) -> int:
@@ -248,36 +331,32 @@ def save_reply_to_memory(user_id: int, reply_text: str) -> int:
     if not clean_text:
         return 0
 
-    if len(clean_text) > 1200:
-        clean_text = clean_text[:1200] + "..."
+    if len(clean_text) > MAX_REPLY_LENGTH:
+        clean_text = clean_text[:MAX_REPLY_LENGTH] + "..."
 
     with _LOCK:
         data = _load_memory()
         bucket = _get_user_bucket(data, user_id)
-        replies = bucket.get("saved_replies", [])
 
-        replies = [item for item in replies if item != clean_text]
+        replies = [item for item in bucket["saved_replies"] if item != clean_text]
         replies.insert(0, clean_text)
-
-        replies = replies[:10]
-        bucket["saved_replies"] = replies
+        bucket["saved_replies"] = _sanitize_saved_replies(replies)
 
         _save_memory(data)
-        return len(replies)
+        return len(bucket["saved_replies"])
 
 
 def register_user_event(user_id: int, event_type: str = "generation") -> dict:
     with _LOCK:
         data = _load_memory()
         bucket = _get_user_bucket(data, user_id)
-        stats = _get_stats_bucket(bucket)
+        stats = bucket["stats"]
 
         today = _today_str()
-        activity_dates = _normalize_activity_dates(stats.get("activity_dates", []))
 
+        activity_dates = list(stats["activity_dates"])
         if today not in activity_dates:
             activity_dates.append(today)
-
         stats["activity_dates"] = _normalize_activity_dates(activity_dates)
 
         counter_map = {
@@ -290,7 +369,7 @@ def register_user_event(user_id: int, event_type: str = "generation") -> dict:
 
         counter_key = counter_map.get(event_type)
         if counter_key:
-            stats[counter_key] = int(stats.get(counter_key, 0)) + 1
+            stats[counter_key] = max(0, int(stats.get(counter_key, 0)) + 1)
 
         result = _build_engagement_stats(bucket)
         _save_memory(data)
