@@ -32,15 +32,8 @@ if not BOT_TOKEN:
 bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher()
 
-# Память диалога
 user_dialogues = {}
-
-# Настройки Модуля 1 для каждого пользователя
 user_module1_settings = {}
-
-# Данные уже отправленных ответов бота:
-# ключ = message_id сообщения с вариантами
-# значение = всё, что нужно для перегенерации и выбора варианта
 result_message_payloads = {}
 
 MAX_HISTORY_LINES = 6
@@ -208,11 +201,14 @@ def format_module1_result(result: dict) -> str:
     variants_text = result["formatted_variants"]
     best_index = result["best_index"]
     best_reason = result["best_reason"]
+    best_variant_text = result["best_variant_text"]
 
     return (
+        "Варианты ответа:\n"
         f"{variants_text}\n\n"
-        f"Сильнее выглядит вариант {best_index}.\n"
-        f"Почему: {best_reason}"
+        f"✅ Рекомендую вариант {best_index}:\n"
+        f"{best_variant_text}\n\n"
+        f"Почему он сильнее: {best_reason}"
     )
 
 
@@ -236,6 +232,7 @@ def save_result_payload(
         "variants": result["variants"],
         "best_index": result["best_index"],
         "best_reason": result["best_reason"],
+        "best_variant_text": result["best_variant_text"],
     }
 
     if len(result_message_payloads) > MAX_SAVED_RESULTS:
@@ -243,25 +240,45 @@ def save_result_payload(
         result_message_payloads.pop(oldest_key, None)
 
 
+async def safe_refresh_settings_markup(callback: CallbackQuery, user_id: int):
+    if not callback.message:
+        return
+
+    try:
+        await callback.message.edit_reply_markup(
+            reply_markup=build_module1_keyboard(user_id)
+        )
+    except Exception:
+        # Если Telegram не дал обновить клавиатуру (например, она не изменилась),
+        # просто молча пропускаем.
+        pass
+
+
+async def send_module1_panel(message: Message):
+    user_id = message.from_user.id
+    get_user_module1_state(user_id)
+
+    await message.answer(
+        "Модуль 1: Мгновенный ответ 2.0\n\n"
+        "Что умеет сейчас:\n"
+        "• 3–7 вариантов ответа\n"
+        "• выбор тона\n"
+        "• выбор цели\n"
+        "• рекомендация лучшего варианта\n"
+        "• перегенерация и быстрый выбор готового текста\n\n"
+        "Выбери настройки кнопками ниже и отправь сообщение.",
+        reply_markup=build_module1_keyboard(user_id),
+    )
+
+    await message.answer(build_status_text(user_id))
+
+
 @dp.message(CommandStart())
 async def cmd_start(message: Message):
     user_id = message.from_user.id
     user_dialogues[user_id] = []
     user_module1_settings[user_id] = get_default_module1_state()
-
-    await message.answer(
-        "Привет! База проекта активна.\n\n"
-        "Быстрые команды проверки:\n"
-        "• /ping — Telegram-часть отвечает\n"
-        "• /base ваш текст — один базовый ответ от GigaChat\n\n"
-        "Основной режим:\n"
-        "• Модуль 1 уже включён\n"
-        "• можно выбирать тон, цель и число вариантов\n\n"
-        "Выбери настройки кнопками ниже, потом отправь сообщение.",
-        reply_markup=build_module1_keyboard(user_id),
-    )
-
-    await message.answer(build_status_text(user_id))
+    await send_module1_panel(message)
 
 
 @dp.message(Command("help"))
@@ -271,10 +288,11 @@ async def cmd_help(message: Message):
 
     await message.answer(
         "Доступные режимы:\n\n"
-        "1. /ping — проверить Telegram\n"
-        "2. /base ваш текст — получить один базовый ответ от GigaChat\n"
-        "3. Обычное сообщение — получить Модуль 1 (варианты + лучший вариант)\n\n"
-        "Под ответом Модуля 1 доступны:\n"
+        "• /ping — проверить Telegram\n"
+        "• /base ваш текст — один базовый ответ от GigaChat\n"
+        "• /reply — открыть панель Модуля 1\n"
+        "• обычное сообщение — Модуль 1 (варианты + лучший вариант)\n\n"
+        "Под ответом Модуля 1:\n"
         "• Перегенерировать\n"
         "• Взять конкретный вариант\n\n"
         "Команды:\n"
@@ -283,6 +301,11 @@ async def cmd_help(message: Message):
     )
 
     await message.answer(build_status_text(user_id))
+
+
+@dp.message(Command("reply"))
+async def cmd_reply_panel(message: Message):
+    await send_module1_panel(message)
 
 
 @dp.message(Command("ping"))
@@ -354,11 +377,9 @@ async def process_module1_tone(callback: CallbackQuery):
     state["tone"] = tone_key
 
     await callback.answer("Тон обновлён")
+    await safe_refresh_settings_markup(callback, user_id)
 
     if callback.message:
-        await callback.message.edit_reply_markup(
-            reply_markup=build_module1_keyboard(user_id)
-        )
         await callback.message.answer(build_status_text(user_id))
 
 
@@ -379,11 +400,9 @@ async def process_module1_goal(callback: CallbackQuery):
     state["goal"] = goal_key
 
     await callback.answer("Цель обновлена")
+    await safe_refresh_settings_markup(callback, user_id)
 
     if callback.message:
-        await callback.message.edit_reply_markup(
-            reply_markup=build_module1_keyboard(user_id)
-        )
         await callback.message.answer(build_status_text(user_id))
 
 
@@ -401,11 +420,9 @@ async def process_module1_variants(callback: CallbackQuery):
     state["variants_count"] = variants_count
 
     await callback.answer("Количество обновлено")
+    await safe_refresh_settings_markup(callback, user_id)
 
     if callback.message:
-        await callback.message.edit_reply_markup(
-            reply_markup=build_module1_keyboard(user_id)
-        )
         await callback.message.answer(build_status_text(user_id))
 
 
@@ -564,9 +581,7 @@ async def handle_text_message(message: Message):
         )
 
         add_to_history(user_id, "Пользователь", user_text)
-
-        best_variant_text = result["variants"][result["best_index"] - 1]
-        add_to_history(user_id, "Бот", best_variant_text)
+        add_to_history(user_id, "Бот", result["best_variant_text"])
 
     except Exception as e:
         print(f"Ошибка: {e}")

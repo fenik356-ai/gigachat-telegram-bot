@@ -22,7 +22,6 @@ if not GIGACHAT_CREDENTIALS:
     raise ValueError("В файле .env не найден GIGACHAT_CREDENTIALS")
 
 
-# Оставляем для совместимости со старым режимом
 LEGACY_STYLE_PROMPTS = {
     "friendly": "дружелюбно, тепло и просто",
     "formal": "официально, вежливо и аккуратно",
@@ -136,10 +135,13 @@ def _parse_module1_response(raw_text: str, variants_count: int) -> dict:
     if best_index < 1 or best_index > len(variants):
         best_index = 1
 
+    best_variant_text = variants[best_index - 1]
+
     return {
         "variants": variants,
         "best_index": best_index,
         "best_reason": best_reason,
+        "best_variant_text": best_variant_text,
         "formatted_variants": _format_numbered_list(variants),
         "formatted_explanation": f"Почему сильнее: {best_reason}",
         "raw_text": raw_text,
@@ -182,6 +184,7 @@ def generate_reply_options_v2(
             "variants": [fallback_text],
             "best_index": 1,
             "best_reason": "Без входного сообщения нельзя предложить варианты.",
+            "best_variant_text": fallback_text,
             "formatted_variants": f"1) {fallback_text}",
             "formatted_explanation": "Почему сильнее: сначала нужен текст сообщения.",
             "raw_text": fallback_text,
@@ -221,17 +224,18 @@ def get_gigachat_response(
     variants_count: int = 3,
     dialogue_context: str = "",
 ) -> str:
-    """
-    Старая совместимая функция.
-    Оставляем её, чтобы текущий бот продолжал работать, если где-то ещё используется старый режим.
-    """
     if not user_text or not user_text.strip():
         return "Пожалуйста, напиши текстовое сообщение."
 
     if style not in LEGACY_STYLE_PROMPTS:
         style = "friendly"
 
-    variants_count = max(1, min(int(variants_count), 3))
+    try:
+        variants_count = int(variants_count)
+    except (TypeError, ValueError):
+        variants_count = 3
+
+    variants_count = max(1, min(variants_count, 3))
     context_block = _build_context_block(dialogue_context)
 
     prompt = (
