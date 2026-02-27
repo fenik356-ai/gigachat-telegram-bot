@@ -26,6 +26,12 @@ from module1_reply_presets import (
     get_tone_label,
     normalize_variants_count,
 )
+from scenario_presets import (
+    DEFAULT_SCENARIO_KEY,
+    SCENARIO_OPTIONS,
+    get_scenario_instruction,
+    get_scenario_label,
+)
 
 load_dotenv()
 
@@ -41,6 +47,7 @@ user_dialogues = {}
 user_module1_settings = {}
 user_analysis_modes = {}
 user_dialog_analysis_modes = {}
+user_scenarios = {}
 
 # ключ = (chat_id, message_id)
 result_message_payloads = {}
@@ -83,6 +90,12 @@ def get_user_dialog_analysis_mode(user_id: int) -> str:
     return user_dialog_analysis_modes[user_id]
 
 
+def get_user_scenario(user_id: int) -> str:
+    if user_id not in user_scenarios:
+        user_scenarios[user_id] = DEFAULT_SCENARIO_KEY
+    return user_scenarios[user_id]
+
+
 def add_to_history(user_id: int, speaker: str, text: str):
     clean_text = " ".join(text.split())
 
@@ -115,6 +128,23 @@ def extract_command_payload_or_reply_text(message: Message) -> str:
         return reply_to.text.strip()
 
     return ""
+
+
+def build_effective_scenario_text(raw_text: str, scenario_key: str) -> str:
+    if scenario_key not in SCENARIO_OPTIONS:
+        scenario_key = DEFAULT_SCENARIO_KEY
+
+    if scenario_key == DEFAULT_SCENARIO_KEY:
+        return raw_text
+
+    scenario_instruction = get_scenario_instruction(scenario_key)
+
+    return (
+        "Это задача для генерации ответа в конкретном сценарии.\n"
+        f"Сценарий: {scenario_instruction}.\n"
+        "Нужно предложить варианты ответа именно для такой ситуации.\n"
+        f"Исходное сообщение / ситуация:\n{raw_text}"
+    )
 
 
 def build_module1_keyboard(user_id: int) -> InlineKeyboardMarkup:
@@ -290,6 +320,85 @@ def build_dialog_analysis_keyboard(user_id: int) -> InlineKeyboardMarkup:
     )
 
 
+def build_scenario_keyboard(user_id: int) -> InlineKeyboardMarkup:
+    current_scenario = get_user_scenario(user_id)
+
+    def scenario_text(key: str) -> str:
+        label = get_scenario_label(key)
+        return f"✅ {label}" if current_scenario == key else label
+
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                InlineKeyboardButton(
+                    text=scenario_text("neutral"),
+                    callback_data="sc_mode:neutral",
+                ),
+                InlineKeyboardButton(
+                    text=scenario_text("dating_intro"),
+                    callback_data="sc_mode:dating_intro",
+                ),
+            ],
+            [
+                InlineKeyboardButton(
+                    text=scenario_text("restore_contact"),
+                    callback_data="sc_mode:restore_contact",
+                ),
+                InlineKeyboardButton(
+                    text=scenario_text("business"),
+                    callback_data="sc_mode:business",
+                ),
+            ],
+            [
+                InlineKeyboardButton(
+                    text=scenario_text("sales"),
+                    callback_data="sc_mode:sales",
+                ),
+                InlineKeyboardButton(
+                    text=scenario_text("support"),
+                    callback_data="sc_mode:support",
+                ),
+            ],
+            [
+                InlineKeyboardButton(
+                    text=scenario_text("soft_decline"),
+                    callback_data="sc_mode:soft_decline",
+                ),
+                InlineKeyboardButton(
+                    text=scenario_text("boundaries"),
+                    callback_data="sc_mode:boundaries",
+                ),
+            ],
+            [
+                InlineKeyboardButton(
+                    text=scenario_text("hard_talk"),
+                    callback_data="sc_mode:hard_talk",
+                ),
+                InlineKeyboardButton(
+                    text=scenario_text("rescue_chat"),
+                    callback_data="sc_mode:rescue_chat",
+                ),
+            ],
+            [
+                InlineKeyboardButton(
+                    text=scenario_text("first_message"),
+                    callback_data="sc_mode:first_message",
+                ),
+                InlineKeyboardButton(
+                    text=scenario_text("close_result"),
+                    callback_data="sc_mode:close_result",
+                ),
+            ],
+            [
+                InlineKeyboardButton(
+                    text=scenario_text("difficult_person"),
+                    callback_data="sc_mode:difficult_person",
+                ),
+            ],
+        ]
+    )
+
+
 def build_result_keyboard(variants_count: int) -> InlineKeyboardMarkup:
     rows = [
         [
@@ -332,6 +441,7 @@ def build_status_text(user_id: int) -> str:
     tone_key = state["tone"]
     goal_key = state["goal"]
     variants_count = state["variants_count"]
+    scenario_key = get_user_scenario(user_id)
 
     tone_label = "Обычный" if tone_key == DEFAULT_TONE else get_tone_label(tone_key)
 
@@ -339,7 +449,8 @@ def build_status_text(user_id: int) -> str:
         "Текущие настройки:\n"
         f"• Тон: {tone_label}\n"
         f"• Цель: {get_goal_label(goal_key)}\n"
-        f"• Вариантов: {variants_count}"
+        f"• Вариантов: {variants_count}\n"
+        f"• Сценарий: {get_scenario_label(scenario_key)}"
     )
 
 
@@ -383,9 +494,11 @@ def save_result_payload(
     message_id: int,
     user_id: int,
     source_text: str,
+    effective_source_text: str,
     dialogue_context: str,
     tone_key: str,
     goal_key: str,
+    scenario_key: str,
     variants_count: int,
     result: dict,
 ):
@@ -394,9 +507,11 @@ def save_result_payload(
     result_message_payloads[key] = {
         "user_id": user_id,
         "source_text": source_text,
+        "effective_source_text": effective_source_text,
         "dialogue_context": dialogue_context,
         "tone_key": tone_key,
         "goal_key": goal_key,
+        "scenario_key": scenario_key,
         "variants_count": variants_count,
         "variants": result["variants"],
         "best_index": result["best_index"],
@@ -450,6 +565,18 @@ async def safe_refresh_dialog_analysis_markup(callback: CallbackQuery, user_id: 
         pass
 
 
+async def safe_refresh_scenario_markup(callback: CallbackQuery, user_id: int):
+    if not callback.message:
+        return
+
+    try:
+        await callback.message.edit_reply_markup(
+            reply_markup=build_scenario_keyboard(user_id)
+        )
+    except Exception:
+        pass
+
+
 async def safe_remove_result_markup(callback: CallbackQuery):
     if not callback.message:
         return
@@ -463,6 +590,7 @@ async def safe_remove_result_markup(callback: CallbackQuery):
 async def send_module1_panel(message: Message):
     user_id = message.from_user.id
     get_user_module1_state(user_id)
+    get_user_scenario(user_id)
 
     await message.answer(
         "Модуль 1: Мгновенный ответ 2.0\n\n"
@@ -470,6 +598,7 @@ async def send_module1_panel(message: Message):
         "• 3–7 вариантов ответа\n"
         "• выбор тона\n"
         "• выбор цели\n"
+        "• выбор сценария\n"
         "• рекомендация лучшего варианта\n"
         "• перегенерация и быстрый выбор готового текста\n\n"
         "Выбери настройки кнопками ниже и отправь сообщение.",
@@ -523,6 +652,28 @@ async def send_dialog_analysis_panel(message: Message):
     await message.answer(build_dialog_analysis_status_text(user_id))
 
 
+async def send_scenario_panel(message: Message):
+    user_id = message.from_user.id
+    get_user_scenario(user_id)
+
+    await message.answer(
+        "Режимы и сценарии\n\n"
+        "Сценарий — это контекст, в котором бот будет предлагать варианты ответа.\n\n"
+        "Примеры:\n"
+        "• знакомства\n"
+        "• продажи\n"
+        "• вернуть контакт\n"
+        "• клиентский сервис\n"
+        "• отказ без конфликта\n"
+        "• сложный человек\n\n"
+        "Выбери сценарий кнопками ниже.\n"
+        "После этого отправляй обычное сообщение — сценарий применится к Модулю 1.",
+        reply_markup=build_scenario_keyboard(user_id),
+    )
+
+    await message.answer(build_status_text(user_id))
+
+
 @dp.message(CommandStart())
 async def cmd_start(message: Message):
     user_id = message.from_user.id
@@ -530,6 +681,7 @@ async def cmd_start(message: Message):
     user_module1_settings[user_id] = get_default_module1_state()
     user_analysis_modes[user_id] = "general"
     user_dialog_analysis_modes[user_id] = "general"
+    user_scenarios[user_id] = DEFAULT_SCENARIO_KEY
     await send_module1_panel(message)
 
 
@@ -539,12 +691,14 @@ async def cmd_help(message: Message):
     get_user_module1_state(user_id)
     get_user_analysis_mode(user_id)
     get_user_dialog_analysis_mode(user_id)
+    get_user_scenario(user_id)
 
     await message.answer(
         "Доступные режимы:\n\n"
         "• /ping — проверить Telegram\n"
         "• /base ваш текст — один базовый ответ от GigaChat\n"
         "• /reply — открыть панель Модуля 1\n"
+        "• /scenario — открыть панель сценариев\n"
         "• /analyze — открыть панель аналитики одного сообщения\n"
         "• /analyze ваш текст — разобрать одно сообщение\n"
         "• /dialog — открыть панель анализа переписки\n"
@@ -569,6 +723,11 @@ async def cmd_help(message: Message):
 @dp.message(Command("reply"))
 async def cmd_reply_panel(message: Message):
     await send_module1_panel(message)
+
+
+@dp.message(Command("scenario"))
+async def cmd_scenario_panel(message: Message):
+    await send_scenario_panel(message)
 
 
 @dp.message(Command("ping"))
@@ -734,6 +893,28 @@ async def process_dialog_analysis_mode(callback: CallbackQuery):
         await callback.message.answer(build_dialog_analysis_status_text(user_id))
 
 
+@dp.callback_query(F.data.startswith("sc_mode:"))
+async def process_scenario_mode(callback: CallbackQuery):
+    if not callback.data:
+        await callback.answer("Не удалось определить сценарий")
+        return
+
+    scenario_key = callback.data.split(":", 1)[1]
+
+    if scenario_key not in SCENARIO_OPTIONS:
+        await callback.answer("Неизвестный сценарий")
+        return
+
+    user_id = callback.from_user.id
+    user_scenarios[user_id] = scenario_key
+
+    await callback.answer("Сценарий обновлён")
+    await safe_refresh_scenario_markup(callback, user_id)
+
+    if callback.message:
+        await callback.message.answer(build_status_text(user_id))
+
+
 @dp.callback_query(F.data.startswith("m1_tone:"))
 async def process_module1_tone(callback: CallbackQuery):
     if not callback.data:
@@ -824,7 +1005,7 @@ async def process_module1_regen(callback: CallbackQuery):
     try:
         new_result = await asyncio.to_thread(
             generate_reply_options_v2,
-            payload["source_text"],
+            payload["effective_source_text"],
             payload["variants_count"],
             payload["tone_key"],
             payload["goal_key"],
@@ -854,9 +1035,11 @@ async def process_module1_regen(callback: CallbackQuery):
             target_message_id,
             payload["user_id"],
             payload["source_text"],
+            payload["effective_source_text"],
             payload["dialogue_context"],
             payload["tone_key"],
             payload["goal_key"],
+            payload["scenario_key"],
             payload["variants_count"],
             new_result,
         )
@@ -965,18 +1148,21 @@ async def handle_text_message(message: Message):
 
     user_id = message.from_user.id
     state = get_user_module1_state(user_id)
+    scenario_key = get_user_scenario(user_id)
 
     tone_key = state["tone"]
     goal_key = state["goal"]
     variants_count = state["variants_count"]
     dialogue_context = get_dialogue_context(user_id)
 
+    effective_user_text = build_effective_scenario_text(user_text, scenario_key)
+
     await message.answer("Генерирую варианты...")
 
     try:
         result = await asyncio.to_thread(
             generate_reply_options_v2,
-            user_text,
+            effective_user_text,
             variants_count,
             tone_key,
             goal_key,
@@ -996,9 +1182,11 @@ async def handle_text_message(message: Message):
             sent_result_message.message_id,
             user_id,
             user_text,
+            effective_user_text,
             dialogue_context,
             tone_key,
             goal_key,
+            scenario_key,
             variants_count,
             result,
         )
