@@ -36,7 +36,9 @@ from scenario_presets import (
 )
 from user_memory import (
     get_saved_replies,
+    get_user_engagement_stats,
     get_user_preset,
+    register_user_event,
     save_reply_to_memory,
     save_user_preset,
 )
@@ -104,6 +106,15 @@ def get_user_scenario(user_id: int) -> str:
     return user_scenarios[user_id]
 
 
+def apply_tone_to_state(state: dict, tone_value: str):
+    if tone_value == "neutral":
+        state["tone"] = DEFAULT_TONE
+        return
+
+    if tone_value in TONE_OPTIONS:
+        state["tone"] = tone_value
+
+
 def apply_saved_preset_if_exists(user_id: int):
     preset = get_user_preset(user_id)
 
@@ -117,8 +128,7 @@ def apply_saved_preset_if_exists(user_id: int):
     variants_count = preset.get("variants_count")
     scenario = preset.get("scenario")
 
-    if tone in TONE_OPTIONS:
-        state["tone"] = tone
+    apply_tone_to_state(state, tone)
 
     if goal in GOAL_OPTIONS:
         state["goal"] = goal
@@ -525,6 +535,83 @@ def build_dialog_analysis_status_text(user_id: int) -> str:
     )
 
 
+def build_progress_text(user_id: int) -> str:
+    stats = get_user_engagement_stats(user_id)
+
+    achievement_lines = ["• Пока достижений мало — просто продолжай пользоваться ботом."]
+    if stats["achievements"]:
+        achievement_lines = [f"• {item}" for item in stats["achievements"]]
+
+    return (
+        "Твой прогресс:\n"
+        f"• Активных дней: {stats['total_active_days']}\n"
+        f"• Текущая серия: {stats['current_streak']}\n"
+        f"• Лучшая серия: {stats['best_streak']}\n"
+        f"• Генераций: {stats['generation_count']}\n"
+        f"• Разборов сообщений: {stats['analysis_count']}\n"
+        f"• Разборов переписки: {stats['dialog_count']}\n"
+        f"• Сохранённых лучших ответов: {stats['saved_replies_count']}\n"
+        f"• Открытий AI-коуча: {stats['coach_view_count']}\n\n"
+        "Достижения:\n"
+        + "\n".join(achievement_lines)
+    )
+
+
+def build_coach_focus(stats: dict) -> str:
+    if stats["generation_count"] < 5:
+        return "Сделай сегодня 3 генерации на реальных сообщениях и сравни, какой вариант сильнее."
+    if stats["saved_replies_count"] < 3:
+        return "Сохрани хотя бы 1 сильный ответ через кнопку ⭐ Сохранить лучший."
+    if stats["analysis_count"] + stats["dialog_count"] < 5:
+        return "Разбери минимум 1 входящее через /analyze или 1 диалог через /dialog."
+    if stats["current_streak"] < 3:
+        return "Зайди завтра снова и удержи серию активности."
+    return "Прогони сегодня один реальный кейс от анализа до финального ответа и сохрани лучший результат."
+
+
+def build_coach_tip(user_id: int) -> str:
+    scenario_key = get_user_scenario(user_id)
+
+    tips = {
+        "neutral": "Сначала формулируй ситуацию одной короткой фразой — так ответы будут точнее.",
+        "dating_intro": "В знакомствах сильнее работают лёгкие фразы, на которые легко ответить.",
+        "restore_contact": "После паузы лучше не оправдываться слишком долго — мягкий вход работает лучше.",
+        "business": "В деловой переписке ясность важнее креатива: один запрос — один следующий шаг.",
+        "sales": "В продажах лучше снижать трение: меньше давления, больше ясной пользы.",
+        "support": "В клиентском сервисе сначала снижай напряжение, потом веди к решению.",
+        "soft_decline": "Мягкий отказ лучше работает, когда он короткий, ясный и без лишних оправданий.",
+        "boundaries": "Границы звучат сильнее, когда ты говоришь спокойно и без агрессии.",
+        "hard_talk": "В сложном разговоре лучше замедлиться и убрать лишние эмоции из формулировки.",
+        "rescue_chat": "Чтобы оживить диалог, лучше вернуть лёгкость, а не пытаться резко “дожать”.",
+        "first_message": "Первое сообщение должно быть простым для ответа — без перегруза и давления.",
+        "close_result": "Чтобы закрыть на результат, формулируй один конкретный следующий шаг.",
+        "difficult_person": "Со сложным человеком сильнее работает короткий, спокойный и предсказуемый ответ.",
+    }
+
+    return tips.get(scenario_key, tips["neutral"])
+
+
+def build_daily_coach_text(user_id: int) -> str:
+    stats = get_user_engagement_stats(user_id)
+    scenario_label = get_scenario_label(get_user_scenario(user_id))
+    saved_replies = get_saved_replies(user_id)
+
+    if saved_replies:
+        answer_of_day = saved_replies[0]
+    else:
+        answer_of_day = "Пока нет сохранённого ответа дня. Сначала сгенерируй варианты и нажми ⭐ Сохранить лучший."
+
+    return (
+        "Твой AI-коуч на сегодня:\n"
+        f"• Текущая серия: {stats['current_streak']}\n"
+        f"• Активных дней: {stats['total_active_days']}\n"
+        f"• Текущий сценарий: {scenario_label}\n\n"
+        f"Фокус на сегодня:\n• {build_coach_focus(stats)}\n\n"
+        f"Мини-обучение:\n• {build_coach_tip(user_id)}\n\n"
+        f"Ответ дня:\n• {answer_of_day}"
+    )
+
+
 def format_saved_replies_text(replies: list[str]) -> str:
     if not replies:
         return (
@@ -724,7 +811,7 @@ async def send_scenario_panel(message: Message):
 
     await message.answer(
         "Режимы и сценарии\n\n"
-        "Теперь сценарий — это автопресет:\n"
+        "Сценарий — это автопресет:\n"
         "• он сам подставляет тон\n"
         "• сам подставляет цель\n"
         "• сам подставляет количество вариантов\n\n"
@@ -767,6 +854,8 @@ async def cmd_help(message: Message):
         "• /save_preset — сохранить текущий личный пресет\n"
         "• /my_preset — показать текущий сохранённый пресет\n"
         "• /saved — показать сохранённые удачные ответы\n"
+        "• /coach — открыть ежедневный AI-коуч\n"
+        "• /progress — показать прогресс и достижения\n"
         "• /analyze — открыть панель аналитики одного сообщения\n"
         "• /analyze ваш текст — разобрать одно сообщение\n"
         "• /dialog — открыть панель анализа переписки\n"
@@ -846,6 +935,19 @@ async def cmd_saved(message: Message):
     await message.answer(format_saved_replies_text(replies))
 
 
+@dp.message(Command("coach"))
+async def cmd_coach(message: Message):
+    user_id = message.from_user.id
+    register_user_event(user_id, "coach")
+    await message.answer(build_daily_coach_text(user_id))
+
+
+@dp.message(Command("progress"))
+async def cmd_progress(message: Message):
+    user_id = message.from_user.id
+    await message.answer(build_progress_text(user_id))
+
+
 @dp.message(Command("ping"))
 async def cmd_ping(message: Message):
     await message.answer("OK: Telegram-часть работает.")
@@ -912,6 +1014,8 @@ async def cmd_analyze(message: Message):
             dialogue_context,
         )
 
+        register_user_event(user_id, "analysis")
+
         await message.answer(
             f"Режим анализа: {ANALYSIS_MODE_LABELS.get(mode, 'Общий')}\n\n{analysis_text}"
         )
@@ -945,6 +1049,8 @@ async def cmd_dialog(message: Message):
             mode,
             dialogue_context,
         )
+
+        register_user_event(user_id, "dialog")
 
         await message.answer(
             f"Режим разбора диалога: {DIALOG_ANALYSIS_MODE_LABELS.get(mode, 'Общий')}\n\n{analysis_text}"
@@ -1027,8 +1133,7 @@ async def process_scenario_mode(callback: CallbackQuery):
     defaults = get_scenario_defaults(scenario_key)
     state = get_user_module1_state(user_id)
 
-    if defaults["tone"] in TONE_OPTIONS:
-        state["tone"] = defaults["tone"]
+    apply_tone_to_state(state, defaults["tone"])
 
     if defaults["goal"] in GOAL_OPTIONS:
         state["goal"] = defaults["goal"]
@@ -1231,6 +1336,8 @@ async def process_module1_save_best(callback: CallbackQuery):
         await callback.answer("Не удалось сохранить")
         return
 
+    register_user_event(callback.from_user.id, "save")
+
     await callback.answer("Лучший вариант сохранён")
 
     if callback.message:
@@ -1358,6 +1465,7 @@ async def handle_text_message(message: Message):
 
         add_to_history(user_id, "Пользователь", user_text)
         add_to_history(user_id, "Бот", result["best_variant_text"])
+        register_user_event(user_id, "generation")
 
     except Exception as e:
         print(f"Ошибка: {e}")
